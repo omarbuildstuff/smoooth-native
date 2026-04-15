@@ -12,8 +12,8 @@ struct RecordingSessionMeta: Codable {
     let pixelScale: Double           // backing scale (1 on Intel, 2 on Retina)
     let fps: Int32
     let codec: String                // "hevc" | "h264"
-    let clockSessionStartSeconds: Double
-    var duration: CMTime             // updated at stop
+    var clockSessionStartSeconds: Double  // mutated when first-frame anchor lands
+    var duration: CMTime                  // updated at stop
     var appVersion: String
 
     enum CodingKeys: String, CodingKey {

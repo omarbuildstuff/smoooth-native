@@ -6,17 +6,19 @@ import VideoToolbox
 /// Wraps AVAssetWriter for writing HEVC video + optional AAC audio to a .mov file during capture.
 ///
 /// Design notes:
-/// - Hardware-accelerated HEVC encode via VideoToolbox is requested via the
-///   `kVTCompressionPropertyKey_EnableHardwareAcceleratedVideoEncoder` / `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder`
-///   attributes passed through AVAssetWriter's `compressionProperties`.
-/// - We don't do any effects here. Frames go in, frames come out, HEVC is written.
-/// - Input is a `CVPixelBuffer` delivered by ScreenCaptureKit. We don't re-alloc or copy.
+/// - Session time in the output file is **zero-based**: `startSession(atSourceTime: .zero)` and
+///   every appended sample buffer is retimed `pts - anchorPTS`. The saved file's timeline starts
+///   at 0 and matches the event log's session-relative timestamps.
+/// - Input is a `CVPixelBuffer` delivered by ScreenCaptureKit. We retime via
+///   `CMSampleBufferCreateCopyWithNewTiming` (zero-copy — only the timing info changes).
+/// - Not thread-safe by itself; owner should serialize calls on a dedicated writer queue.
 final class ScratchWriter: @unchecked Sendable {
 
     enum WriterError: Error {
         case alreadyStarted
         case notStarted
         case missingVideoSettings
+        case retimingFailed(OSStatus)
         case avError(Error)
     }
 
@@ -28,7 +30,10 @@ final class ScratchWriter: @unchecked Sendable {
 
     private(set) var isRecording: Bool = false
     private var started: Bool = false
-    private var startPTS: CMTime = .invalid
+
+    /// The host-time PTS (seconds since mach boot) of the first video frame — this is the session
+    /// zero-point. All subsequent samples are retimed relative to this.
+    private(set) var anchorPTS: CMTime = .invalid
 
     let width: Int
     let height: Int
@@ -50,7 +55,6 @@ final class ScratchWriter: @unchecked Sendable {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         writer.shouldOptimizeForNetworkUse = false
 
-        // Video input
         let bitrate = bitrateForHEVC(width: width, height: height, fps: Int(fps))
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.hevc,
@@ -84,7 +88,7 @@ final class ScratchWriter: @unchecked Sendable {
         self.pixelBufferAdaptor = adaptor
     }
 
-    /// Configure an optional audio input. Must be called before `start(at:)`.
+    /// Configure an optional audio input. Must be called before `startSession(anchorPTS:)`.
     func addAudioInput() {
         guard let writer else { return }
         let settings: [String: Any] = [
@@ -103,31 +107,35 @@ final class ScratchWriter: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    func start(at pts: CMTime) throws {
+    /// Start the writer session at time zero; `anchorPTS` is the first-frame host PTS used to
+    /// rebase all subsequent samples.
+    func startSession(anchorPTS: CMTime) throws {
         guard let writer else { throw WriterError.notStarted }
         guard !started else { throw WriterError.alreadyStarted }
         if !writer.startWriting() {
             if let err = writer.error { throw WriterError.avError(err) }
         }
-        writer.startSession(atSourceTime: pts)
-        startPTS = pts
+        writer.startSession(atSourceTime: .zero)
+        self.anchorPTS = anchorPTS
         started = true
         isRecording = true
-        Log.storage.info("ScratchWriter started at pts=\(pts.secondsOrZero, format: .fixed(precision: 4))s")
+        Log.storage.info("ScratchWriter session=0, anchorPTS=\(anchorPTS.secondsOrZero, format: .fixed(precision: 4))s")
     }
 
-    // MARK: - Append
+    // MARK: - Append (PTS-rebased)
 
     @discardableResult
     func appendVideo(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard isRecording, let input = videoInput, input.isReadyForMoreMediaData else { return false }
-        return input.append(sampleBuffer)
+        guard let retimed = retime(sampleBuffer) else { return false }
+        return input.append(retimed)
     }
 
     @discardableResult
     func appendAudio(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard isRecording, let input = audioInput, input.isReadyForMoreMediaData else { return false }
-        return input.append(sampleBuffer)
+        guard let retimed = retime(sampleBuffer) else { return false }
+        return input.append(retimed)
     }
 
     // MARK: - Finish
@@ -143,16 +151,45 @@ final class ScratchWriter: @unchecked Sendable {
         if let err = writer.error { throw WriterError.avError(err) }
         Log.storage.info("ScratchWriter finished: \(self.url.path)")
 
-        // Query actual duration
         let asset = AVURLAsset(url: url)
         let duration = (try? await asset.load(.duration)) ?? .zero
         return duration
     }
 
+    // MARK: - Retiming
+
+    /// Rebase the sample buffer's PTS to `(pts - anchorPTS)`. Decode timestamps (if present) are
+    /// rebased too. Duration is preserved.
+    private func retime(_ sb: CMSampleBuffer) -> CMSampleBuffer? {
+        guard CMTIME_IS_VALID(anchorPTS) else { return nil }
+        let origPTS = CMSampleBufferGetPresentationTimeStamp(sb)
+        let origDTS = CMSampleBufferGetDecodeTimeStamp(sb)
+        let origDur = CMSampleBufferGetDuration(sb)
+
+        var timingInfo = CMSampleTimingInfo(
+            duration: origDur,
+            presentationTimeStamp: CMTimeSubtract(origPTS, anchorPTS),
+            decodeTimeStamp: CMTIME_IS_VALID(origDTS) ? CMTimeSubtract(origDTS, anchorPTS) : .invalid
+        )
+
+        var out: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sb,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timingInfo,
+            sampleBufferOut: &out
+        )
+        guard status == noErr else {
+            Log.storage.error("Sample retiming failed: \(status)")
+            return nil
+        }
+        return out
+    }
+
     // MARK: - Helpers
 
     private func bitrateForHEVC(width: Int, height: Int, fps: Int) -> Int {
-        // Rough bits-per-pixel heuristic tuned for screen content (higher motion tolerance).
         // 4K60 → ~50 Mbps, 1080p60 → ~18 Mbps, 720p30 → ~6 Mbps.
         let bpp = 0.06
         return Int(Double(width * height * fps) * bpp)

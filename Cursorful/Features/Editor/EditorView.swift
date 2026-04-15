@@ -153,9 +153,11 @@ final class EditorLoader: ObservableObject {
 
             let model = TimelineModel(package: package, project: project)
 
+            // Read event log ONCE, share across timeline + effects.
+            let events = EventLogReader.read(url: package.eventsURL)
+
             // Auto-generate zoom if no existing track
             if model.project.zoomTrack.isEmpty {
-                let events = EventLogReader.read(url: package.eventsURL)
                 model.generateAutoZoom(clicks: events.clicks)
             }
 
@@ -166,7 +168,6 @@ final class EditorLoader: ObservableObject {
             renderer.zoomEffect.sample = .identity
             renderer.cursorEffect.sourceSize = sourceSize
             renderer.rippleEffect.sourceSize = sourceSize
-            let events = EventLogReader.read(url: package.eventsURL)
             renderer.cursorEffect.load(samples: events.cursorSamples)
             renderer.rippleEffect.load(clicks: events.clicks)
             renderer.zoomRegions = model.project.zoomTrack

@@ -2,25 +2,49 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-/// Tracks mouse position (120Hz) and clicks system-wide. Requires Accessibility permission for the
-/// `CGEventTap`. Falls back to `NSEvent.mouseLocation` polling if the tap can't be created.
+/// Tracks mouse position (~120Hz poll) and clicks (CGEventTap) for a specific recorded display.
 ///
-/// Coordinate system: delivered in "top-left origin" display pixels (matches SCK video frame
-/// coordinates). AppKit's `NSEvent.mouseLocation` returns flipped coordinates which we flip once.
+/// Coordinate system: emitted positions are **display-local pixels with top-left origin**,
+/// matching SCK video-frame coordinates.
+///
+/// Translation:
+/// - `NSEvent.mouseLocation` is in AppKit's global space: bottom-left origin at the primary
+///   display's bottom-left corner. We subtract the display's global origin and flip Y using the
+///   display frame's height.
+/// - `CGEvent.location` is already top-left origin in **global** display pixels. We subtract the
+///   display's top-left origin (in top-left coordinates) to get display-local.
+///
+/// Requires Accessibility permission for `CGEventTap`; cursor polling works without it.
 final class CursorTracker: @unchecked Sendable {
 
     var onCursorSample: ((CursorSample) -> Void)?
     var onClick: ((ClickEvent) -> Void)?
 
     private let clock: EventClock
+
+    /// The recorded display's frame in AppKit global coords (bottom-left origin of primary).
+    private let displayFrame: CGRect
+
+    /// Same frame but in top-left-origin CG global coords (used for CGEvent.location translation).
+    private let displayOriginTopLeft: CGPoint
+
     private var pollingTimer: DispatchSourceTimer?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var lastPosition: CGPoint = .zero
+    private var lastPosition: CGPoint = .init(x: -1, y: -1)
     private let pollQueue = DispatchQueue(label: "com.cursorful.cursor.poll", qos: .userInteractive)
 
-    init(clock: EventClock) {
+    init(clock: EventClock, displayFrame: CGRect) {
         self.clock = clock
+        self.displayFrame = displayFrame
+        // In CG top-left global coords, origin is the top edge of the display's screen rect.
+        // The primary display's top edge is at y=0. A display positioned above the primary in
+        // AppKit (y > primary.height) has a negative top-left-y in CG space.
+        let primaryHeight = NSScreen.screens
+            .first(where: { $0.frame.origin == .zero })?.frame.height
+            ?? NSScreen.main?.frame.height ?? displayFrame.height
+        let topLeftY = primaryHeight - (displayFrame.origin.y + displayFrame.height)
+        self.displayOriginTopLeft = CGPoint(x: displayFrame.origin.x, y: topLeftY)
     }
 
     // MARK: - Start / stop
@@ -28,7 +52,7 @@ final class CursorTracker: @unchecked Sendable {
     func start() {
         startPollingTimer()
         installEventTap()
-        Log.events.info("CursorTracker started")
+        Log.events.info("CursorTracker started (display frame \(String(describing: self.displayFrame)))")
     }
 
     func stop() {
@@ -45,7 +69,7 @@ final class CursorTracker: @unchecked Sendable {
         Log.events.info("CursorTracker stopped")
     }
 
-    // MARK: - Polling timer (120Hz fallback / supplement)
+    // MARK: - Polling timer (120Hz supplement)
 
     private func startPollingTimer() {
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
@@ -59,11 +83,17 @@ final class CursorTracker: @unchecked Sendable {
     }
 
     private func pollCursor() {
-        let flipped = NSEvent.mouseLocation
-        // Convert from AppKit bottom-left to top-left display coordinates.
-        let screenHeight = NSScreen.main?.frame.height ?? 1080
-        let position = CGPoint(x: flipped.x, y: screenHeight - flipped.y)
-        // Dedup identical positions to reduce JSONL noise (cursor idle case).
+        // `NSEvent.mouseLocation`: global AppKit coords (bottom-left origin of primary display).
+        let mouse = NSEvent.mouseLocation
+        let relX = mouse.x - displayFrame.origin.x
+        let relYFromTop = (displayFrame.origin.y + displayFrame.height) - mouse.y
+        let position = CGPoint(x: relX, y: relYFromTop)
+
+        // Clip to the recorded display's rect — out-of-bounds samples add noise.
+        guard position.x >= 0, position.y >= 0,
+              position.x <= displayFrame.width, position.y <= displayFrame.height else {
+            return
+        }
         if position == lastPosition { return }
         lastPosition = position
         let time = clock.now()
@@ -107,24 +137,30 @@ final class CursorTracker: @unchecked Sendable {
     }
 
     private func handleEvent(type: CGEventType, event: CGEvent) {
-        let location = event.location
+        // CGEvent.location is top-left-origin in **global** CG display coords.
+        // Translate to display-local by subtracting the display's top-left origin.
+        let global = event.location
+        let local = CGPoint(x: global.x - displayOriginTopLeft.x,
+                            y: global.y - displayOriginTopLeft.y)
+
         let ticks = event.timestamp
         let time = clock.time(fromCGEventTimestamp: ticks)
 
         let button: ClickEvent.Button
         let down: Bool
         switch type {
-        case .leftMouseDown:  button = .left; down = true
-        case .leftMouseUp:    button = .left; down = false
-        case .rightMouseDown: button = .right; down = true
-        case .rightMouseUp:   button = .right; down = false
+        case .leftMouseDown:  button = .left;   down = true
+        case .leftMouseUp:    button = .left;   down = false
+        case .rightMouseDown: button = .right;  down = true
+        case .rightMouseUp:   button = .right;  down = false
         case .otherMouseDown: button = .middle; down = true
         case .otherMouseUp:   button = .middle; down = false
         default: return
         }
 
         let mods = event.flags.rawValue
-        let click = ClickEvent(time: time, position: location, button: button, modifiers: UInt(mods), isDown: down)
+        let click = ClickEvent(time: time, position: local, button: button,
+                               modifiers: UInt(mods), isDown: down)
         onClick?(click)
     }
 }

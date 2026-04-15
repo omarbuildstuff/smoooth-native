@@ -103,14 +103,17 @@ final class PreviewRenderer: NSObject, ObservableObject, MTKViewDelegate {
     }
 
     // MARK: - MTKViewDelegate
+    //
+    // MTKView invokes its delegate on the main thread by default. Since this class is @MainActor,
+    // we use `nonisolated(unsafe)` stubs that trampoline to the main-isolated impl via
+    // MainActor.assumeIsolated (no Task hop, no actor context switch).
 
     nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     nonisolated func draw(in view: MTKView) {
-        Task { @MainActor in self.drawNow(in: view) }
+        MainActor.assumeIsolated { self.drawNow(in: view) }
     }
 
-    @MainActor
     private func drawNow(in view: MTKView) {
         guard let pb = latestPixelBuffer,
               let input = context.textureCache.texture(from: pb),
@@ -119,7 +122,6 @@ final class PreviewRenderer: NSObject, ObservableObject, MTKViewDelegate {
             view.currentDrawable?.present()
             return
         }
-        // Update per-frame uniforms from timeline state
         let t = currentTime
         zoomEffect.sample = AutoZoomPlanner.evaluate(regions: zoomRegions, at: t)
 

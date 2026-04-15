@@ -6,12 +6,13 @@ import Foundation
 ///
 /// Algorithm:
 /// 1. Cluster clicks within `clusterWindow` seconds into "gestures."
-/// 2. For each gesture: zoom-in starts `leadIn` before first click, holds at `targetScale`
-///    until `tailOut` after last click, then zooms out to 1.0.
-/// 3. Merge overlapping regions: widen centroid, cap scale at `maxScale`.
-/// 4. Clamp min hold duration.
+/// 2. Merge gestures whose **padded time ranges** `[first - leadIn, last + tailOut]` overlap.
+///    This yields merged click-lists, so centroids and bounding boxes come from the UNION of
+///    all original clicks — N-way-correct (unlike pairwise centroid averaging).
+/// 3. Per merged gesture, build a region: zoom-in at `leadIn`, hold, zoom-out at `tailOut`.
+/// 4. Clamp to total duration.
 ///
-/// Keyframe times inside a region are **relative to the region start** (i.e. `.zero` = region start).
+/// Keyframe times inside a region are **relative to region start**.
 enum AutoZoomPlanner {
     struct Settings {
         var clusterWindow: Double = 1.5
@@ -31,89 +32,82 @@ enum AutoZoomPlanner {
         let downs = clicks.filter { $0.isDown }
         guard !downs.isEmpty else { return [] }
 
-        // 1. Cluster clicks into gestures
+        // 1. Cluster into gestures
+        let sorted = downs.sorted(by: { $0.time < $1.time })
         var gestures: [[ClickEvent]] = []
         var current: [ClickEvent] = []
-        for click in downs.sorted(by: { $0.time < $1.time }) {
-            if let last = current.last {
-                let dt = click.time.secondsOrZero - last.time.secondsOrZero
-                if dt <= settings.clusterWindow {
-                    current.append(click)
-                } else {
-                    gestures.append(current)
-                    current = [click]
-                }
-            } else {
+        for click in sorted {
+            if let last = current.last,
+               click.time.secondsOrZero - last.time.secondsOrZero <= settings.clusterWindow {
                 current.append(click)
+            } else {
+                if !current.isEmpty { gestures.append(current) }
+                current = [click]
             }
         }
         if !current.isEmpty { gestures.append(current) }
 
+        // 2. Merge gestures whose padded ranges overlap.
+        //    This preserves the underlying click list so centroids use all originals.
+        var merged: [[ClickEvent]] = []
+        for gesture in gestures {
+            guard let last = merged.last else { merged.append(gesture); continue }
+
+            let lastEnd = (last.last!.time.secondsOrZero) + settings.tailOut
+            let curStart = (gesture.first!.time.secondsOrZero) - settings.leadIn
+            if curStart <= lastEnd {
+                merged[merged.count - 1].append(contentsOf: gesture)
+            } else {
+                merged.append(gesture)
+            }
+        }
+
         let safeW = max(1, sourceSize.width)
         let safeH = max(1, sourceSize.height)
 
-        // 2. Build regions
-        var regions: [ZoomRegion] = gestures.map { gesture in
+        // 3. Build one region per (possibly merged) gesture
+        var regions: [ZoomRegion] = merged.map { gesture in
             let positions = gesture.map { $0.position }
+
+            // Centroid over the UNION of clicks — N-way-correct.
             let cx = positions.reduce(CGFloat(0)) { $0 + $1.x } / CGFloat(positions.count)
             let cy = positions.reduce(CGFloat(0)) { $0 + $1.y } / CGFloat(positions.count)
-            let centerUV = CGPoint(x: cx / safeW, y: cy / safeH)
 
+            // Scale: use target for single gestures; for merged spans, widen via the bounding box.
+            let scale: CGFloat
+            if positions.count == 1 {
+                scale = settings.targetScale
+            } else {
+                let bbox = CGRect.bounding(positions)
+                // Fit the bbox into the zoomed viewport with 20% margin.
+                let fitScaleX = safeW / max(1, bbox.width) * 0.8
+                let fitScaleY = safeH / max(1, bbox.height) * 0.8
+                let maxFit = min(fitScaleX, fitScaleY)
+                scale = max(1.2, min(settings.maxScale, min(settings.targetScale, maxFit)))
+            }
+
+            let centerUV = CGPoint(x: cx / safeW, y: cy / safeH)
             let firstT = gesture.first!.time.secondsOrZero
             let lastT  = gesture.last!.time.secondsOrZero
             let startAbs = max(0, firstT - settings.leadIn)
-            let endAbs   = max(startAbs + settings.minHold + settings.leadIn + settings.tailOut,
-                               lastT + settings.tailOut)
+            let endAbs = max(startAbs + settings.leadIn + settings.minHold + settings.tailOut,
+                             lastT + settings.tailOut)
             let dur = endAbs - startAbs
 
             return ZoomRegion(
                 id: UUID(),
                 start: CMTime(seconds: startAbs, preferredTimescale: 1_000_000_000),
                 end:   CMTime(seconds: endAbs,   preferredTimescale: 1_000_000_000),
-                keyframes: buildKeyframes(
-                    dur: dur,
-                    center: centerUV,
-                    scale: settings.targetScale,
-                    leadIn: settings.leadIn,
-                    tailOut: settings.tailOut
-                ),
+                keyframes: buildKeyframes(dur: dur, center: centerUV, scale: scale,
+                                          leadIn: settings.leadIn, tailOut: settings.tailOut),
                 timingFunction: settings.timing,
                 isAutoGenerated: true
             )
         }
 
-        // 3. Merge overlapping regions
-        regions.sort { $0.start < $1.start }
-        var merged: [ZoomRegion] = []
-        for r in regions {
-            guard var prev = merged.last, r.start < prev.end else {
-                merged.append(r)
-                continue
-            }
-
-            // Take the midpoint of the two centroids (their first "zoomed" keyframe).
-            let prevCenter = prev.keyframes.dropFirst().first?.centerUV ?? CGPoint(x: 0.5, y: 0.5)
-            let rCenter    = r.keyframes.dropFirst().first?.centerUV    ?? CGPoint(x: 0.5, y: 0.5)
-            let newCenter  = CGPoint(x: (prevCenter.x + rCenter.x) / 2,
-                                     y: (prevCenter.y + rCenter.y) / 2)
-            let prevMaxScale = prev.keyframes.map(\.scale).max() ?? 1.0
-            let rMaxScale    = r.keyframes.map(\.scale).max() ?? 1.0
-            let newScale     = min(settings.maxScale, max(prevMaxScale, rMaxScale))
-
-            prev.end = max(prev.end, r.end)
-            let dur = prev.end.secondsOrZero - prev.start.secondsOrZero
-            prev.keyframes = buildKeyframes(
-                dur: dur,
-                center: newCenter,
-                scale: newScale,
-                leadIn: settings.leadIn,
-                tailOut: settings.tailOut
-            )
-            merged[merged.count - 1] = prev
-        }
-
         // 4. Clip to total duration
-        return merged.compactMap { r in
+        regions.sort { $0.start < $1.start }
+        return regions.compactMap { r in
             var r = r
             if r.start >= totalDuration { return nil }
             if r.end > totalDuration { r.end = totalDuration }
@@ -128,25 +122,26 @@ enum AutoZoomPlanner {
                                        leadIn: Double,
                                        tailOut: Double) -> [ZoomKeyframe] {
         let ts: (Double) -> CMTime = { CMTime(seconds: $0, preferredTimescale: 1_000_000_000) }
-        let zoomInEnd  = min(leadIn, dur * 0.49)
+        let zoomInEnd = min(leadIn, dur * 0.49)
         let zoomOutStart = max(zoomInEnd + 0.05, dur - tailOut)
         return [
-            ZoomKeyframe(time: .zero,              centerUV: center, scale: 1.0),
-            ZoomKeyframe(time: ts(zoomInEnd),      centerUV: center, scale: scale),
-            ZoomKeyframe(time: ts(zoomOutStart),   centerUV: center, scale: scale),
-            ZoomKeyframe(time: ts(dur),            centerUV: center, scale: 1.0),
+            ZoomKeyframe(time: .zero,            centerUV: center, scale: 1.0),
+            ZoomKeyframe(time: ts(zoomInEnd),    centerUV: center, scale: scale),
+            ZoomKeyframe(time: ts(zoomOutStart), centerUV: center, scale: scale),
+            ZoomKeyframe(time: ts(dur),          centerUV: center, scale: 1.0),
         ]
     }
 
-    /// Evaluate the zoom state at an absolute time `t`. Returns identity if no region is active.
+    /// Evaluate the zoom state at absolute time `t`. Assumes each region has sorted keyframes
+    /// (guaranteed by `buildKeyframes` at construction). No redundant sort here.
     static func evaluate(regions: [ZoomRegion], at t: CMTime) -> ZoomSample {
         guard let region = regions.first(where: { t >= $0.start && t <= $0.end }) else {
             return .identity
         }
 
         let local = CMTimeSubtract(t, region.start)
-        let keyframes = region.keyframes.sorted { $0.time < $1.time }
-        guard let first = keyframes.first, let last = keyframes.last else { return .identity }
+        let kfs = region.keyframes
+        guard let first = kfs.first, let last = kfs.last else { return .identity }
 
         if local <= first.time {
             return ZoomSample(centerUV: first.centerUV, scale: first.scale)
@@ -154,16 +149,16 @@ enum AutoZoomPlanner {
         if local >= last.time {
             return ZoomSample(centerUV: last.centerUV, scale: last.scale)
         }
-
-        for i in 0..<(keyframes.count - 1) {
-            let k0 = keyframes[i], k1 = keyframes[i + 1]
+        for i in 0..<(kfs.count - 1) {
+            let k0 = kfs[i], k1 = kfs[i + 1]
             if local >= k0.time && local <= k1.time {
                 let span = k1.time.secondsOrZero - k0.time.secondsOrZero
                 let prog = span > 0 ? (local.secondsOrZero - k0.time.secondsOrZero) / span : 1.0
                 let u = region.timingFunction.value(at: prog)
-                let center = CGPoint.lerp(k0.centerUV, k1.centerUV, CGFloat(u))
-                let scale = CGFloat.lerp(k0.scale, k1.scale, CGFloat(u))
-                return ZoomSample(centerUV: center, scale: scale)
+                return ZoomSample(
+                    centerUV: CGPoint.lerp(k0.centerUV, k1.centerUV, CGFloat(u)),
+                    scale:    CGFloat.lerp(k0.scale,    k1.scale,    CGFloat(u))
+                )
             }
         }
         return .identity

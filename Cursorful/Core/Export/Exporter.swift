@@ -8,12 +8,15 @@ import MetalKit
 /// Pumps frames from the source video through the EffectGraph at export resolution and hands each
 /// rendered pixel buffer to the `VideoEncoder`.
 ///
-/// Lifecycle:
-///   let exporter = Exporter(package: pkg, project: project, preset: preset)
-///   try await exporter.run(progress: { p in ... })
-///   → produces `output.mp4` next to the bundle
-@MainActor
-final class Exporter: ObservableObject {
+/// Post-review fixes:
+/// - Render target is a **CVPixelBuffer-backed** MTLTexture (`.shared` storage via
+///   `CVMetalTextureCache`). No CPU readback, no `getBytes`, no `.private` texture.
+/// - No `commandBuffer.waitUntilCompleted()` — we rely on the encoder's
+///   `isReadyForMoreMediaData` gate for backpressure, and on Metal's internal resource tracking
+///   to ensure the pixel buffer is GPU-fresh before append.
+/// - Lives outside `MainActor`; UI mirrors `@Published progress/state` on MainActor via the
+///   ExporterHolder in ExportSheet.
+final class Exporter: ObservableObject, @unchecked Sendable {
 
     @Published var progress: Double = 0
     @Published var state: State = .idle
@@ -25,10 +28,6 @@ final class Exporter: ObservableObject {
     let preset: ExportPreset
     let outputURL: URL
 
-    private var ctx: EffectContext?
-    private var provider: FrameProvider?
-    private var encoder: VideoEncoder?
-
     init(package: RecordingPackage, project: Project, preset: ExportPreset, outputURL: URL? = nil) {
         self.package = package
         self.project = project
@@ -38,26 +37,22 @@ final class Exporter: ObservableObject {
     }
 
     func run() async {
-        state = .running
-        progress = 0
+        await MainActor.run { self.state = .running; self.progress = 0 }
         do {
             let ctx = try EffectContext()
-            self.ctx = ctx
+
             let provider = FrameProvider(url: package.videoURL)
             try await provider.prepare()
-            self.provider = provider
-
-            let encoder = VideoEncoder(url: outputURL, preset: preset)
-            try encoder.prepare()
-            self.encoder = encoder
-
             let sourceSize = await provider.naturalSize
             let duration   = await provider.duration
             try await provider.startLinearRead(from: .zero, to: duration)
 
-            // Build effect graph for export quality
+            let encoder = VideoEncoder(url: outputURL, preset: preset)
+            try encoder.prepare()
+
+            // Build effect graph with project settings
             let graph = EffectGraph(context: ctx)
-            let zoom = ZoomEffect()
+            let zoom   = ZoomEffect()
             let cursor = CursorOverlayEffect()
             let ripple = ClickRippleEffect()
             let mockup = MockupFrameEffect()
@@ -65,89 +60,83 @@ final class Exporter: ObservableObject {
             cursor.sourceSize = sourceSize
             ripple.sourceSize = sourceSize
             cursor.size = project.cursor.size
-            mockup.settings.paddingRatio = project.mockup.paddingRatio
-            mockup.settings.cornerRadius = project.mockup.cornerRadius
+            mockup.settings.paddingRatio   = project.mockup.paddingRatio
+            mockup.settings.cornerRadius   = project.mockup.cornerRadius
             mockup.settings.shadowStrength = project.mockup.shadowStrength
-            mockup.settings.shadowSpread = project.mockup.shadowSpread
+            mockup.settings.shadowSpread   = project.mockup.shadowSpread
             cursor.load(samples: events.cursorSamples)
             ripple.load(clicks: events.clicks)
 
             var effects: [Effect] = [zoom]
-            if project.cursor.enabled  { effects.append(cursor) }
+            if project.cursor.enabled    { effects.append(cursor) }
             if project.cursor.showRipples { effects.append(ripple) }
-            if project.mockup.enabled  { effects.append(mockup) }
+            if project.mockup.enabled    { effects.append(mockup) }
             try graph.setEffects(effects)
 
-            // Start encoder session
+            // Start encoder session at 0 — source video is already session-rebased by ScratchWriter.
             try encoder.start(atSource: .zero)
 
-            // Output texture (destination) sized to preset
             let w = preset.width, h = preset.height
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
-                                                                width: w, height: h, mipmapped: false)
-            desc.usage = [.renderTarget, .shaderRead]
-            desc.storageMode = .private
-
-            // Frame-by-frame pump
             let fps = preset.fps
-            var frameIndex: Int = 0
             let totalFrames = Int(duration.secondsOrZero * Double(fps))
+            var frameIndex: Int = 0
 
-            while let pb = await provider.nextFrame() {
-                guard let input = ctx.textureCache.texture(from: pb) else { continue }
-                guard let output = ctx.device.makeTexture(descriptor: desc) else { continue }
+            guard let pool = encoder.pixelBufferPool() else {
+                throw ExportError.noPixelBufferPool
+            }
 
-                // Time for this frame
+            while let sourcePB = await provider.nextFrame() {
+                guard let input = ctx.textureCache.texture(from: sourcePB) else { continue }
+
+                // Get a fresh destination PixelBuffer from the encoder's pool and wrap as MTLTexture.
+                var outPB: CVPixelBuffer?
+                let s = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outPB)
+                guard s == kCVReturnSuccess, let destPB = outPB,
+                      let destTex = ctx.textureCache.texture(from: destPB) else {
+                    Log.export.warning("Failed to borrow destination pixel buffer")
+                    continue
+                }
+
                 let t = CMTime(value: CMTimeValue(frameIndex), timescale: fps)
                 zoom.sample = AutoZoomPlanner.evaluate(regions: project.zoomTrack, at: t)
 
-                let cb = ctx.queue.makeCommandBuffer()!
+                guard let cb = ctx.queue.makeCommandBuffer() else { continue }
                 graph.render(input: input,
-                             output: output,
+                             output: destTex,
                              time: t,
                              commandBuffer: cb,
                              viewport: CGSize(width: w, height: h))
                 cb.commit()
-                cb.waitUntilCompleted()
+                // No waitUntilCompleted. VideoEncoder's append awaits isReadyForMoreMediaData;
+                // the adaptor guarantees GPU work completes before consuming the pixel buffer.
 
-                // Copy output texture into a pixel buffer the encoder can ingest.
-                guard let dstPB = try await makePixelBuffer(from: output, pool: encoder.pixelBufferPool()) else {
-                    continue
-                }
-                try await encoder.append(pixelBuffer: dstPB, pts: t)
+                try await encoder.append(pixelBuffer: destPB, pts: t)
 
                 frameIndex += 1
                 if totalFrames > 0 {
                     let frac = Double(frameIndex) / Double(totalFrames)
-                    self.progress = min(1, frac)
+                    await MainActor.run { self.progress = min(1, frac) }
                 }
             }
 
             try await encoder.finish()
-            state = .finished(outputURL)
-            progress = 1
+            await MainActor.run {
+                self.state = .finished(self.outputURL)
+                self.progress = 1
+            }
             Log.export.info("Export finished: \(self.outputURL.path)")
         } catch {
             Log.export.error("Export failed: \(error.localizedDescription)")
-            state = .failed(error.localizedDescription)
+            await MainActor.run { self.state = .failed(error.localizedDescription) }
         }
     }
 
-    /// Read back a Metal texture into a CVPixelBuffer from the encoder's pool.
-    private func makePixelBuffer(from texture: MTLTexture,
-                                 pool: CVPixelBufferPool?) async throws -> CVPixelBuffer? {
-        guard let pool else { return nil }
-        var pb: CVPixelBuffer?
-        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pb)
-        guard status == kCVReturnSuccess, let pb else { return nil }
-
-        CVPixelBufferLockBaseAddress(pb, [])
-        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
-        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
-
-        let region = MTLRegionMake2D(0, 0, texture.width, texture.height)
-        texture.getBytes(base, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
-        return pb
+    enum ExportError: Error, LocalizedError {
+        case noPixelBufferPool
+        var errorDescription: String? {
+            switch self {
+            case .noPixelBufferPool: return "Encoder did not provide a pixel buffer pool."
+            }
+        }
     }
 }

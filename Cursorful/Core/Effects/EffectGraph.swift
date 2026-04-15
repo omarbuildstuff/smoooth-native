@@ -14,10 +14,16 @@ protocol Effect: AnyObject {
 }
 
 /// Linear chain of effects. Caller prepares once, then calls `render` per frame.
+///
+/// Threading / lifetime:
+/// - Intermediate textures borrowed from `context.textureCache` are NOT released synchronously
+///   after `encode` — that would let the pool hand the same texture out to another borrower while
+///   the GPU is still reading from it (write-after-read hazard).
+/// - Instead, we accumulate the list of borrowed intermediates and release them via
+///   `commandBuffer.addCompletedHandler` so the pool only sees them again after the GPU is done.
 final class EffectGraph {
     private(set) var effects: [Effect] = []
     private let context: EffectContext
-    private var pipelineCopy: MTLRenderPipelineState?
 
     init(context: EffectContext) {
         self.context = context
@@ -28,8 +34,6 @@ final class EffectGraph {
         for e in effects { try e.prepare(context: context) }
     }
 
-    /// Render the chain. `input` is the raw source texture; `output` is the final target.
-    /// Ping-pongs between two transient textures when effect count > 1.
     func render(input: MTLTexture,
                 output: MTLTexture,
                 time: CMTime,
@@ -43,7 +47,9 @@ final class EffectGraph {
             return
         }
 
-        // Allocate ping-pong as needed
+        // Borrowed intermediates — returned to the pool only after the GPU finishes this buffer.
+        var borrowed: [MTLTexture] = []
+
         var current = input
         for (i, effect) in effects.enumerated() {
             let dst: MTLTexture
@@ -51,14 +57,19 @@ final class EffectGraph {
                 dst = output
             } else {
                 guard let mid = context.textureCache.borrow(width: w, height: h) else { return }
+                borrowed.append(mid)
                 dst = mid
             }
             effect.encode(commandBuffer, input: current, output: dst, time: time, viewport: viewport)
-            if i > 0 {
-                // Recycle previous intermediate (not the original input, not the final output)
-                if current !== input { context.textureCache.release(current) }
-            }
             current = dst
+        }
+
+        // Release-back-to-pool after GPU completion.
+        if !borrowed.isEmpty {
+            let cache = context.textureCache
+            commandBuffer.addCompletedHandler { _ in
+                for t in borrowed { cache.release(t) }
+            }
         }
     }
 

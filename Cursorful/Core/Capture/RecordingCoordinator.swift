@@ -9,7 +9,12 @@ import Foundation
 /// Lifecycle:
 ///   idle → preparing → recording → stopping → finalizing → idle
 ///
-/// On stop the coordinator produces a finalized `RecordingPackage` and emits it via `onFinish`.
+/// Design decisions (after code review):
+/// - Writer appends run on a dedicated serial queue (`writerQueue`) — NOT on MainActor.
+///   Capture callbacks do only a `writerQueue.async` hop; MainActor never touches the hot path.
+/// - `EventClock.anchor(toFirstFramePTSSeconds:)` is called with the first frame's PTS, making
+///   the session zero-point match the first video frame. Cursor/click samples taken before the
+///   first frame get clamped to t=0 at read time (tiny epsilon — SCStream startup < 500ms).
 @MainActor
 final class RecordingCoordinator: ObservableObject {
 
@@ -24,7 +29,7 @@ final class RecordingCoordinator: ObservableObject {
         case finalizing
     }
 
-    // MARK: - Public callbacks (set by AppDelegate / views)
+    // MARK: - Public callbacks
 
     var onStateChange: ((State) -> Void)?
     var onFinish: ((RecordingPackage) -> Void)?
@@ -46,9 +51,10 @@ final class RecordingCoordinator: ObservableObject {
     private var cursorTracker: CursorTracker?
     private var clock: EventClock?
     private var startedAt: Date?
-
-    /// Full meta being built during the session (completed at stop).
     private var metaInFlight: RecordingSessionMeta?
+
+    /// Serial queue owning writer calls + first-frame anchor. Keeps capture off MainActor.
+    private let writerQueue = DispatchQueue(label: "com.cursorful.capture.writer", qos: .userInteractive)
 
     init(store: RecordingStore) {
         self.store = store
@@ -63,14 +69,12 @@ final class RecordingCoordinator: ObservableObject {
         do {
             let display = try await ScreenCapturer.primaryDisplay()
 
-            // Resolve source
             let source: ScreenCapturer.SourceKind
             switch mode {
             case .fullscreen:
                 source = .display(display)
             case .window:
                 let content = try await ScreenCapturer.shareableContent()
-                // Naive heuristic: front-most on-screen window that isn't us.
                 let ourPid = ProcessInfo.processInfo.processIdentifier
                 if let front = content.windows.first(where: {
                     $0.isOnScreen && $0.owningApplication?.processID != ourPid
@@ -81,28 +85,29 @@ final class RecordingCoordinator: ObservableObject {
                 }
             }
 
-            // Package & files
             let pkg = store.createPackage()
             currentPackage = pkg
 
-            // Configuration based on source (always source-native pixels)
             let config = ScreenCapturer.Configuration.defaultFor(source, fps: 60, audio: false)
 
-            // Writer
+            // Writer (not started yet — awaits first-frame anchor)
             let writer = ScratchWriter(url: pkg.videoURL, width: config.width, height: config.height, fps: config.fps)
             try writer.prepare()
             self.writer = writer
+            box.writer = writer
 
-            // Clock
+            // Clock — not anchored until first frame lands
             let clock = EventClock()
             self.clock = clock
+            box.clock = clock
 
             // Event log
             let eventWriter = try EventLogWriter(url: pkg.eventsURL)
             self.eventWriter = eventWriter
 
-            // Cursor tracker
-            let tracker = CursorTracker(clock: clock)
+            // Cursor tracker — bound to recorded-display origin for multi-monitor correctness
+            let screenFrame = screenFrameForDisplay(display)
+            let tracker = CursorTracker(clock: clock, displayFrame: screenFrame)
             tracker.onCursorSample = { [weak eventWriter] sample in eventWriter?.writeCursor(sample) }
             tracker.onClick        = { [weak eventWriter] click  in eventWriter?.writeClick(click) }
             tracker.start()
@@ -110,8 +115,10 @@ final class RecordingCoordinator: ObservableObject {
 
             // Screen capture
             let capturer = ScreenCapturer()
+            // IMPORTANT: these callbacks run on SCK's background queue.
+            // We forward to writerQueue (NOT MainActor).
             capturer.onVideoSampleBuffer = { [weak self] sampleBuffer in
-                self?.handleVideoSample(sampleBuffer)
+                self?.enqueueVideo(sampleBuffer)
             }
             capturer.onStopError = { [weak self] err in
                 Task { @MainActor in self?.handleFatal(err) }
@@ -119,7 +126,7 @@ final class RecordingCoordinator: ObservableObject {
             try await capturer.start(source: source, config: config)
             self.capturer = capturer
 
-            // Meta
+            // Meta — sessionStartSeconds will be updated after anchor lands
             let meta = RecordingSessionMeta(
                 id: pkg.id,
                 startedAt: Date(),
@@ -129,7 +136,7 @@ final class RecordingCoordinator: ObservableObject {
                 pixelScale: 2.0,
                 fps: config.fps,
                 codec: "hevc",
-                clockSessionStartSeconds: clock.sessionStartSeconds,
+                clockSessionStartSeconds: 0, // written at stop time
                 duration: .zero,
                 appVersion: Bundle.main.shortVersion
             )
@@ -161,6 +168,11 @@ final class RecordingCoordinator: ObservableObject {
 
         state = .finalizing
 
+        // Drain any pending writer-queue work before finishing the writer.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            writerQueue.async { cont.resume() }
+        }
+
         let finalDuration: CMTime
         do {
             finalDuration = try await writer?.finish() ?? .zero
@@ -169,9 +181,9 @@ final class RecordingCoordinator: ObservableObject {
             finalDuration = .zero
         }
 
-        // Persist meta
         if var meta = metaInFlight, let pkg = currentPackage {
             meta.duration = finalDuration
+            meta.clockSessionStartSeconds = clock?.sessionStartSeconds ?? 0
             try? pkg.writeMeta(meta)
         }
 
@@ -181,24 +193,37 @@ final class RecordingCoordinator: ObservableObject {
         if let pkg { onFinish?(pkg) }
     }
 
-    // MARK: - Sample handling (background queue)
+    // MARK: - Sample handling — off MainActor
 
-    nonisolated private func handleVideoSample(_ sampleBuffer: CMSampleBuffer) {
-        // Start writer session on the first frame so our timeline zero matches the first frame.
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        Task { @MainActor [weak self] in
-            guard let self, let writer = self.writer else { return }
-            if !writer.isRecording {
-                do {
-                    try writer.start(at: pts)
-                } catch {
-                    Log.capture.error("Writer start failed: \(error.localizedDescription)")
-                    return
-                }
-            }
-            writer.appendVideo(sampleBuffer)
+    nonisolated private func enqueueVideo(_ sampleBuffer: CMSampleBuffer) {
+        // Retain via CFRetain is unnecessary — Swift captures hold the reference.
+        writerQueue.async { [weak self] in
+            self?.handleVideoOnWriterQueue(sampleBuffer)
         }
     }
+
+    /// Runs exclusively on `writerQueue`. Reads writer/clock through a nonisolated Sendable box.
+    nonisolated private func handleVideoOnWriterQueue(_ sampleBuffer: CMSampleBuffer) {
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let ptsSeconds = pts.secondsOrZero
+        guard let writer = box.writer, let clock = box.clock else { return }
+
+        if !writer.isRecording {
+            clock.anchor(toFirstFramePTSSeconds: ptsSeconds)
+            do {
+                try writer.startSession(anchorPTS: pts)
+            } catch {
+                Log.capture.error("Writer startSession failed: \(error.localizedDescription)")
+                return
+            }
+        }
+        _ = writer.appendVideo(sampleBuffer)
+    }
+
+    /// Sendable box holding live capture refs that the writerQueue (and any other nonisolated
+    /// callback) can read without hopping back to MainActor. Mutated only on MainActor during
+    /// start/stop, which strictly happen-before any writerQueue execution.
+    private let box = CaptureBox()
 
     // MARK: - Cleanup
 
@@ -211,11 +236,27 @@ final class RecordingCoordinator: ObservableObject {
         metaInFlight = nil
         currentPackage = nil
         startedAt = nil
+        box.writer = nil
+        box.clock = nil
     }
 
     private func handleFatal(_ error: Error) {
         Log.capture.error("Fatal capture error: \(error.localizedDescription)")
         Task { await self.stopRecording() }
+    }
+
+    // MARK: - Helpers
+
+    private func screenFrameForDisplay(_ display: SCDisplay) -> CGRect {
+        // Match SCDisplay to an NSScreen by displayID so we can map NSEvent.mouseLocation correctly.
+        for screen in NSScreen.screens {
+            if let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+               CGDirectDisplayID(num.uint32Value) == display.displayID {
+                return screen.frame
+            }
+        }
+        // Fallback: use the main screen.
+        return NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: display.width, height: display.height)
     }
 }
 
@@ -225,4 +266,14 @@ private extension Bundle {
     var shortVersion: String {
         (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0"
     }
+}
+
+// MARK: - Sendable storage box
+
+/// Holds live capture refs accessible from any queue. Mutated only on MainActor during
+/// startRecording/teardown — those mutations strictly happen-before any nonisolated read on
+/// the writerQueue (we drain that queue before teardown completes).
+final class CaptureBox: @unchecked Sendable {
+    var writer: ScratchWriter?
+    var clock: EventClock?
 }
