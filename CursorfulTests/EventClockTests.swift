@@ -1,7 +1,7 @@
 import XCTest
 import CoreMedia
 import Darwin
-@testable import Cursorful
+@testable import Smoooth
 
 final class EventClockTests: XCTestCase {
     func testSessionRelativeNowIsMonotonic() {
@@ -20,19 +20,43 @@ final class EventClockTests: XCTestCase {
         XCTAssertEqual(t.seconds, 0, accuracy: 1e-6)
     }
 
-    /// True round-trip: take current mach ticks, run them through both the seconds-bridge and the
-    /// CGEvent-timestamp bridge, verify they agree to within sub-microsecond precision.
-    func testCGEventTimestampRoundTripPrecise() {
-        let nowTicks = mach_absolute_time()
-        let nowSecondsViaBridge = EventClock.seconds(fromCGEventTimestamp: nowTicks)
-        let nowSecondsViaNow = EventClock.nowSeconds()
-        // The two reads happen sub-microseconds apart; must agree within 1ms.
-        XCTAssertEqual(nowSecondsViaBridge, nowSecondsViaNow, accuracy: 0.001)
+    /// CGEventTimestamp is in nanoseconds (not mach ticks). Verify that
+    /// `seconds(fromCGEventTimestamp:)` divides by 1e9 with no timebase multiply.
+    ///
+    /// Regression test for the Apple Silicon bug where the old implementation applied the mach
+    /// timebase multiplier (~41.67×) to a value already in nanoseconds, producing click timestamps
+    /// ~41.67× larger than the recording duration, so AutoZoomPlanner never found a matching
+    /// region.
+    func testCGEventTimestampIsNanosecondsNotMachTicks() {
+        // Feed a known nanosecond value: 5 seconds expressed in nanoseconds.
+        let fiveSecondsInNs: UInt64 = 5_000_000_000
+        let result = EventClock.seconds(fromCGEventTimestamp: fiveSecondsInNs)
+        XCTAssertEqual(result, 5.0, accuracy: 1e-9,
+            "CGEventTimestamp is nanoseconds — dividing by 1e9 must yield 5.0, not ~208.0")
 
-        // Now feed it through a clock anchored 0.5s before "now" and verify the result is ~0.5s.
-        let clock = EventClock(sessionStart: nowSecondsViaNow - 0.5)
-        let cmTime = clock.time(fromCGEventTimestamp: nowTicks)
-        XCTAssertEqual(cmTime.seconds, 0.5, accuracy: 0.005)
+        // Verify the old (wrong) formula would have given a wildly different answer.
+        // On Apple Silicon numer=125, denom=3: wrong result ≈ 5.0 * (125/3) ≈ 208.33 seconds.
+        // We just assert the correct answer is nowhere near 200.
+        XCTAssertLessThan(result, 10.0, "Result must not be inflated by the mach timebase ratio")
+    }
+
+    /// End-to-end round-trip: synthesise a CGEventTimestamp (in nanoseconds) for a click that
+    /// occurs 3.2 seconds into a session, and verify the clock returns ~3.2s.
+    func testCGEventTimestampRoundTripPrecise() {
+        // sessionStart expressed in seconds (as EventClock.nowSeconds() produces).
+        let sessionStartSec = EventClock.nowSeconds()
+
+        // A CGEventTimestamp arrives as absolute nanoseconds since boot.
+        // Simulate a click 3.2 seconds after session start.
+        let clickOffsetSec = 3.2
+        let clickAbsoluteNs = UInt64((sessionStartSec + clickOffsetSec) * 1_000_000_000)
+
+        let clock = EventClock(sessionStart: sessionStartSec)
+        let cmTime = clock.time(fromCGEventTimestamp: clickAbsoluteNs)
+
+        // Should be ~3.2 seconds session-relative, within 1ms.
+        XCTAssertEqual(cmTime.seconds, clickOffsetSec, accuracy: 0.001,
+            "CGEvent click at +3.2s must produce session-relative time of 3.2s")
     }
 
     /// Anchoring is idempotent — the second call must not reset the zero-point.

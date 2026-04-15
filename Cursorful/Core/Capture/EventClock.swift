@@ -34,9 +34,20 @@ final class EventClock: @unchecked Sendable {
         return nanos / nanosPerSecond
     }
 
-    /// Convert CGEvent timestamp (mach ticks) to seconds.
-    static func seconds(fromCGEventTimestamp ticks: UInt64) -> Double {
-        Double(ticks) * Double(timebase.numer) / Double(timebase.denom) / nanosPerSecond
+    /// Convert CGEvent timestamp to seconds.
+    ///
+    /// `CGEventGetTimestamp` returns the event time in nanoseconds (absolute nanoseconds since
+    /// boot), **not** in mach ticks. This is true on both Intel and Apple Silicon — the value is
+    /// already in nanosecond units, so we divide by 1e9 directly without applying the mach
+    /// timebase multiplier.
+    ///
+    /// Contrast with `mach_absolute_time()`, which IS in platform-dependent ticks and DOES
+    /// require the timebase conversion. Using the timebase here would over-inflate the result
+    /// by ~41.67× on Apple Silicon (numer=125, denom=3), placing click timestamps far beyond
+    /// the recording duration and making AutoZoomPlanner generate regions that never match
+    /// any playback time.
+    static func seconds(fromCGEventTimestamp nanoseconds: UInt64) -> Double {
+        Double(nanoseconds) / nanosPerSecond
     }
 
     init(sessionStart: Double = EventClock.nowSeconds()) {
@@ -68,9 +79,9 @@ final class EventClock: @unchecked Sendable {
         return CMTime(seconds: offset, preferredTimescale: 1_000_000_000)
     }
 
-    /// Convert a CGEvent timestamp (mach ticks) to session-relative CMTime.
-    func time(fromCGEventTimestamp ticks: UInt64) -> CMTime {
-        time(fromMachSeconds: Self.seconds(fromCGEventTimestamp: ticks))
+    /// Convert a CGEvent timestamp (nanoseconds) to session-relative CMTime.
+    func time(fromCGEventTimestamp nanoseconds: UInt64) -> CMTime {
+        time(fromMachSeconds: Self.seconds(fromCGEventTimestamp: nanoseconds))
     }
 
     /// Current session-relative time.
