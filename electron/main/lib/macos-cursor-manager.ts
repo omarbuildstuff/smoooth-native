@@ -25,7 +25,7 @@ export function initializeMacOSCursorManager() {
     nativeModule = require('node-macos-cursor')
 
     for (const name of CURSOR_NAMES) {
-      const imageBuffer = nativeModule.getCursorPNGByName(name)
+      const imageBuffer = Buffer.from(nativeModule.getCursorPNGByName(name))
       const imageKey = hash(imageBuffer)
       hashToNameMap[imageKey] = name
     }
@@ -44,12 +44,12 @@ export function initializeMacOSCursorManager() {
 export function getCurrentCursorName(): string {
   if (!isInitialized || runtimeUnavailable) return 'arrow'
   try {
-    const imageBuffer = nativeModule.getCurrentCursorPNG()
+    // Buffer.from() copies data immediately before V8 can invalidate the
+    // external buffer returned by the native module on Electron 31+.
+    const imageBuffer = Buffer.from(nativeModule.getCurrentCursorPNG())
     const imageKey = hash(imageBuffer)
     return hashToNameMap[imageKey] || 'arrow'
   } catch (e) {
-    // Latch the failure so we don't spam the log on every poll. The first
-    // error message is preserved; subsequent polls just return 'arrow'.
     if (!runtimeUnavailable) {
       runtimeUnavailable = true
       log.warn(

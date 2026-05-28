@@ -88,8 +88,6 @@ export async function startScreenCapture(opts: StartScreenCaptureOptions): Promi
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: targetSource.id,
-          minWidth: 1920,
-          minHeight: 1080,
           maxWidth: 7680,
           maxHeight: 4320,
           maxFrameRate: 30,

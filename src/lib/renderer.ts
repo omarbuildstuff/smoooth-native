@@ -190,14 +190,16 @@ export const drawScene = async (
   let frameContentWidth, frameContentHeight
   if (availableWidth / availableHeight > videoAspectRatio) {
     frameContentHeight = availableHeight
-    frameContentWidth = frameContentHeight * videoAspectRatio
+    frameContentWidth = Math.round(frameContentHeight * videoAspectRatio)
+    frameContentHeight = Math.round(frameContentWidth / videoAspectRatio)
   } else {
     frameContentWidth = availableWidth
-    frameContentHeight = frameContentWidth / videoAspectRatio
+    frameContentHeight = Math.round(frameContentWidth / videoAspectRatio)
+    frameContentWidth = Math.round(frameContentHeight * videoAspectRatio)
   }
 
-  const frameX = (outputWidth - frameContentWidth) / 2
-  const frameY = (outputHeight - frameContentHeight) / 2
+  const frameX = Math.round((outputWidth - frameContentWidth) / 2)
+  const frameY = Math.round((outputHeight - frameContentHeight) / 2)
 
   // --- 3. Main video frame transform and drawing ---
   ctx.save()

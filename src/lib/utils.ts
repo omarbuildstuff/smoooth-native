@@ -199,11 +199,11 @@ export const mapExportTimeToSourceTime = (
 
 // Synthesize click-like events from cursor-pause patterns in move events.
 // Used on macOS where CGEventTap is unavailable and no real click events are recorded.
-// Timestamps are in milliseconds (raw from the tracker, before /1000 conversion).
+// Timestamps are in seconds (post /1000 conversion applied by loadProject).
 export function synthesizeClicksFromMoves(metadata: MetaDataItem[]): MetaDataItem[] {
   const PAUSE_RADIUS = 15   // px — cursor must stay within this radius
-  const MIN_PAUSE_MS = 100  // ms — minimum dwell to count as interaction
-  const MAX_PAUSE_MS = 2500 // ms — above this = idle/AFK, not a click
+  const MIN_PAUSE_S = 0.1   // 100ms — minimum dwell to count as interaction
+  const MAX_PAUSE_S = 2.5   // 2500ms — above this = idle/AFK, not a click
 
   const moves = metadata
     .filter((m) => m.type === 'move')
@@ -222,8 +222,8 @@ export function synthesizeClicksFromMoves(metadata: MetaDataItem[]): MetaDataIte
     ) {
       j++
     }
-    const dwellMs = moves[Math.min(j, moves.length) - 1].timestamp - anchor.timestamp
-    if (dwellMs >= MIN_PAUSE_MS && dwellMs <= MAX_PAUSE_MS) {
+    const dwellS = moves[Math.min(j, moves.length) - 1].timestamp - anchor.timestamp
+    if (dwellS >= MIN_PAUSE_S && dwellS <= MAX_PAUSE_S) {
       synthetic.push({ ...anchor, type: 'click', pressed: true })
     }
     i = j
