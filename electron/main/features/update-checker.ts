@@ -6,9 +6,15 @@ import { app, net, BrowserWindow } from 'electron'
 export async function checkForUpdates(window: BrowserWindow | null) {
   if (!window) return
 
+  const repoOwner = ''
+  const repoName = ''
+
+  if (!repoOwner || !repoName) {
+    log.info('[UpdateCheck] No release repo configured — skipping update check.')
+    return
+  }
+
   const currentVersion = app.getVersion()
-  const repoOwner = 'tamnguyenvan'
-  const repoName = 'smoooth'
   const url = `https://api.github.com/repos/${repoOwner}/${repoName}/releases/latest`
   const maxAttempts = 3
   let currentAttempt = 0
@@ -31,7 +37,16 @@ export async function checkForUpdates(window: BrowserWindow | null) {
             const latestVersion = release.tag_name.startsWith('v') ? release.tag_name.substring(1) : release.tag_name
             const downloadUrl = release.html_url
 
-            if (latestVersion > currentVersion) {
+            const compareVersions = (a: string, b: string): number => {
+              const pa = a.split('.').map(Number)
+              const pb = b.split('.').map(Number)
+              for (let i = 0; i < 3; i++) {
+                if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0)
+              }
+              return 0
+            }
+
+            if (compareVersions(latestVersion, currentVersion) > 0) {
               log.info(`[UpdateCheck] New version available: ${latestVersion}`)
               window.webContents.send('update:available', { version: latestVersion, url: downloadUrl })
             } else {
