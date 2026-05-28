@@ -223,7 +223,7 @@ async function startActualRecording(
   useRendererScreenCapture: boolean,
   recordingGeometry: RecordingGeometry,
 ) {
-  const recordingDir = path.join(process.env.HOME || process.env.USERPROFILE || '.', '.smoooth')
+  const recordingDir = path.join(app.getPath('userData'), 'recordings')
   await ensureDirectoryExists(recordingDir)
   const baseName = `Smoooth-recording-${Date.now()}`
 
@@ -517,7 +517,7 @@ export async function startRecording(options: any) {
         title: 'Screen Recording Permission Required',
         message: 'Smoooth needs Screen Recording permission to record your screen.',
         detail:
-          'Go to System Settings → Privacy & Security → Screen Recording and enable the toggle next to "Electron" (the dev build). Then restart the app and try again.',
+          `Go to System Settings → Privacy & Security → Screen Recording and enable the toggle next to "${app.name || 'Smoooth'}". Then restart the app and try again.`,
         buttons: ['Open System Settings', 'Cancel'],
         defaultId: 0,
       })
@@ -542,7 +542,22 @@ export async function startRecording(options: any) {
       }
     }
 
-    // 3. Heads-up for System Audio capture. The actual TCC prompt is fired by
+    // 3. Check Camera Permissions (if requested)
+    if (webcam) {
+      let cameraAccess = systemPreferences.getMediaAccessStatus('camera')
+      if (cameraAccess === 'not-determined') {
+        cameraAccess = (await systemPreferences.askForMediaAccess('camera')) ? 'granted' : 'denied'
+      }
+      if (cameraAccess !== 'granted') {
+        dialog.showErrorBox(
+          'Camera Permission Required',
+          'Camera permissions required. Please go to System Settings → Privacy & Security → Camera and enable this application.',
+        )
+        return { canceled: true }
+      }
+    }
+
+    // 4. Heads-up for System Audio capture. The actual TCC prompt is fired by
     // Chromium when the renderer calls getDisplayMedia. We can't pre-flight it
     // here, but we can inform the user that a prompt will appear on first use.
     // CoreAudio Tap permission (macOS 14.4+) is a separate prompt from Screen
@@ -653,9 +668,15 @@ export async function startRecording(options: any) {
     })
     if (!selectedGeometry) return { canceled: true }
 
-    const safeWidth = Math.floor(selectedGeometry.width / 2) * 2
-    const safeHeight = Math.floor(selectedGeometry.height / 2) * 2
-    recordingGeometry = { x: selectedGeometry.x, y: selectedGeometry.y, width: safeWidth, height: safeHeight }
+    const primaryDisplay = screen.getPrimaryDisplay()
+    const scaleFactor = primaryDisplay.scaleFactor
+    const scaledX = Math.round(selectedGeometry.x * scaleFactor)
+    const scaledY = Math.round(selectedGeometry.y * scaleFactor)
+    const scaledWidth = Math.round(selectedGeometry.width * scaleFactor)
+    const scaledHeight = Math.round(selectedGeometry.height * scaleFactor)
+    const safeWidth = Math.floor(scaledWidth / 2) * 2
+    const safeHeight = Math.floor(scaledHeight / 2) * 2
+    recordingGeometry = { x: scaledX, y: scaledY, width: safeWidth, height: safeHeight }
 
     switch (process.platform) {
       case 'linux':
@@ -1155,7 +1176,7 @@ export async function cleanupAndDiscard() {
  */
 export async function cleanupOrphanedRecordings() {
   log.info('[Cleanup] Starting orphaned recording cleanup...')
-  const recordingDir = path.join(process.env.HOME || process.env.USERPROFILE || '.', '.smoooth')
+  const recordingDir = path.join(app.getPath('userData'), 'recordings')
   const protectedFiles = new Set<string>()
 
   // Protect files from the currently active editor or recording session
@@ -1235,7 +1256,7 @@ export async function loadVideoFromFile() {
   createSavingWindow()
 
   try {
-    const recordingDir = path.join(process.env.HOME || process.env.USERPROFILE || '.', '.smoooth')
+    const recordingDir = path.join(app.getPath('userData'), 'recordings')
     await ensureDirectoryExists(recordingDir)
     const baseName = `Smoooth-recording-${Date.now()}`
     const screenVideoPath = path.join(recordingDir, `${baseName}-screen.mp4`)
