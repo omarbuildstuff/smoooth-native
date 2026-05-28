@@ -1,0 +1,50 @@
+name: Smoooth
+options:
+  bundleIdPrefix: com.smoooth
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "26.0"
+  groupSortPosition: top
+packages:
+  SmooothCore:
+    path: ../SmooothCore
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  Smoooth:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources
+    dependencies:
+      - package: SmooothCore
+        product: SmooothCore
+    info:
+      path: Supporting/Info.plist
+      properties:
+        CFBundleDisplayName: Smoooth
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "26.0"
+        NSHighResolutionCapable: true
+        LSApplicationCategoryType: public.app-category.video
+        NSScreenCaptureUsageDescription: "Smoooth needs to record your computer's screen to capture video."
+        NSAudioCaptureUsageDescription: "Smoooth captures system audio so you can include it in your screen recordings."
+        NSSystemAudioUsageDescription: "Smoooth captures system audio so you can include it in your screen recordings."
+        NSMicrophoneUsageDescription: "Smoooth records from the microphone when you enable it during a recording."
+        NSCameraUsageDescription: "Smoooth accesses the camera when you enable webcam capture during a recording."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.smoooth.app
+        PRODUCT_NAME: Smoooth
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        COMBINE_HIDPI_IMAGES: YES
