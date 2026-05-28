@@ -96,6 +96,7 @@ public final class RecordingCoordinator: ObservableObject {
                 geometry: geometry,
                 systemAudio: options.systemAudio,
                 microphone: options.microphone,
+                microphoneDeviceID: options.microphoneDeviceID,
                 fps: options.fps
             )
             do {

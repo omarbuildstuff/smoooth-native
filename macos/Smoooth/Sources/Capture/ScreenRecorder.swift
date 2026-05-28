@@ -26,6 +26,8 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
     private let geometry: RecordingGeometry
     private let wantsSystemAudio: Bool
     private let wantsMicrophone: Bool
+    /// Specific microphone device to capture; nil uses the system default input.
+    private let microphoneDeviceID: String?
     private let fps: Int
 
     // MARK: - SCKit + writer state
@@ -42,22 +44,39 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
 
     private var sessionStarted = false
     private var firstVideoPTS: CMTime = .invalid
-    private var stopError: Error?
+
+    /// Guards the cross-thread scalars (`stopError`, `firstFrameWallClock`) that
+    /// are written on the SCKit delegate / sample queues and read on the
+    /// MainActor in `stop()` / by the coordinator. A small dedicated lock avoids
+    /// any reentrancy hazard with `sampleQueue` (on which `handleVideo` runs).
+    private let stateLock = NSLock()
+    private var _stopError: Error?
+    private var _firstFrameWallClock: Double?
+
+    private var stopError: Error? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _stopError }
+        set { stateLock.lock(); _stopError = newValue; stateLock.unlock() }
+    }
 
     /// Absolute wall-clock time (seconds since 1970) of the first written video
     /// frame. The coordinator uses this to rebase mouse-event timestamps so the
     /// first frame sits at ~t=0 (replacing ffprobe `birthtimeMs` sync).
-    public private(set) var firstFrameWallClock: Double?
+    public private(set) var firstFrameWallClock: Double? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _firstFrameWallClock }
+        set { stateLock.lock(); _firstFrameWallClock = newValue; stateLock.unlock() }
+    }
 
     public init(outputURL: URL,
                 geometry: RecordingGeometry,
                 systemAudio: Bool,
                 microphone: Bool,
+                microphoneDeviceID: String? = nil,
                 fps: Int) {
         self.outputURL = outputURL
         self.geometry = geometry
         self.wantsSystemAudio = systemAudio
         self.wantsMicrophone = microphone
+        self.microphoneDeviceID = microphoneDeviceID
         self.fps = fps
         super.init()
     }
@@ -135,9 +154,17 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
         }
         stream = nil
         if let writer, writer.status == .writing {
+            // Finish ALL inputs (video + system audio + mic) before flushing, the
+            // same way `stop()` does — otherwise a late audio append can land
+            // after `finishWriting` and trip an append-after-finish assert.
             videoInput?.markAsFinished()
+            systemAudioInput?.markAsFinished()
+            micAudioInput?.markAsFinished()
             await writer.finishWriting()
         }
+        videoInput = nil
+        systemAudioInput = nil
+        micAudioInput = nil
         try? FileManager.default.removeItem(at: outputURL)
     }
 
@@ -205,6 +232,11 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
         }
         if wantsMicrophone, #available(macOS 15.0, *) {
             config.captureMicrophone = true
+            // Honor an explicit device selection; nil falls back to the system
+            // default input (SCKit's behavior when the property is unset).
+            if let microphoneDeviceID {
+                config.microphoneCaptureDeviceID = microphoneDeviceID
+            }
         }
 
         // For an area capture, crop to the selected region. SCStreamConfiguration
@@ -294,8 +326,11 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
 extension ScreenRecorder: SCStreamDelegate {
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
         // Record the error so `stop()` can surface it; the coordinator decides
-        // how to present it (matching the Electron fatal-error handling).
-        if stopError == nil { stopError = error }
+        // how to present it (matching the Electron fatal-error handling). Keep the
+        // first error atomically under the lock (two delegate callbacks can race).
+        stateLock.lock()
+        if _stopError == nil { _stopError = error }
+        stateLock.unlock()
     }
 }
 

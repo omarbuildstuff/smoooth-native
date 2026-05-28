@@ -70,6 +70,12 @@ public final class MouseTracker: @unchecked Sendable {
     private var pollTimer: DispatchSourceTimer?
     private let timerQueue = DispatchQueue(label: "com.smoooth.mousetracker.timer")
 
+    // Main-thread cursor refresher. NSCursor is AppKit/main-thread-only, so the
+    // current cursor shape is snapshotted on the main run loop and stored into the
+    // lock-guarded `cursorImages` / `lastCursorKey`. The tap and poll threads never
+    // touch NSCursor; they only read the most-recent `lastCursorKey` under `lock`.
+    private var cursorRefreshTimer: Timer?
+
     // NSEvent fallback monitors.
     private var globalMonitors: [Any] = []
     private var usingFallback = false
@@ -100,8 +106,10 @@ public final class MouseTracker: @unchecked Sendable {
             return false
         }
 
-        // Seed an initial cursor capture so there's always at least one image.
-        _ = captureCurrentCursor()
+        // Seed an initial cursor capture and start the main-thread refresher so
+        // there's always at least one image. NSCursor must only be read on the
+        // main thread; the tap/poll threads reference the captured key instead.
+        startCursorRefresher()
         startPollingMoves()
         return true
     }
@@ -110,6 +118,19 @@ public final class MouseTracker: @unchecked Sendable {
     public func stop() {
         pollTimer?.cancel()
         pollTimer = nil
+
+        // Tear down the main-thread cursor refresher on the main thread (Timer is
+        // main-thread-affined here). Capture it under the lock to avoid racing the
+        // setup that may still be hopping onto the main queue.
+        let refresher = cursorRefreshTimer
+        cursorRefreshTimer = nil
+        if let refresher {
+            if Thread.isMainThread {
+                refresher.invalidate()
+            } else {
+                DispatchQueue.main.async { refresher.invalidate() }
+            }
+        }
 
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
@@ -236,7 +257,7 @@ public final class MouseTracker: @unchecked Sendable {
             // Poll-driven move uses the HID cursor location so it's correct even
             // when no tap/monitor move event has arrived (pointer held still).
             let location = self.currentGlobalPixelLocation()
-            let key = self.captureCurrentCursor()
+            let key = self.currentCursorKey()
             let sample = RawMouseSample(
                 timestamp: Self.nowSeconds(),
                 x: location.x,
@@ -282,7 +303,7 @@ public final class MouseTracker: @unchecked Sendable {
 
         // CGEvent.location is in global display points, top-left origin.
         let pixel = pixelFromGlobalPoint(event.location)
-        let key = captureCurrentCursor()
+        let key = currentCursorKey()
 
         let sample = RawMouseSample(
             timestamp: Self.nowSeconds(),
@@ -309,7 +330,7 @@ public final class MouseTracker: @unchecked Sendable {
         // NSEvent global monitors deliver no usable window-relative point, so use
         // the HID cursor location (global, top-left origin in CGEvent space).
         let pixel = currentGlobalPixelLocation()
-        let key = captureCurrentCursor()
+        let key = currentCursorKey()
 
         let sample = RawMouseSample(
             timestamp: Self.nowSeconds(),
@@ -336,20 +357,58 @@ public final class MouseTracker: @unchecked Sendable {
 
     // MARK: - Cursor capture
 
+    /// Returns the key of the most-recently main-thread-captured cursor shape.
+    /// Called from the CGEventTap run-loop thread and the poll `timerQueue`; it
+    /// only touches `lastCursorKey` under `lock` and never reads NSCursor (which
+    /// is AppKit/main-thread-only).
+    private func currentCursorKey() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return lastCursorKey
+    }
+
+    /// Installs a main-thread timer that periodically snapshots the current system
+    /// cursor. NSCursor must only be read on the main thread, so all NSCursor
+    /// access is confined here. The refresh cadence matches the move sampler so a
+    /// shape change is picked up within one sample. Scheduling happens on the main
+    /// queue (no blocking `sync`), which is why the tap thread can never deadlock
+    /// against it.
+    private func startCursorRefresher() {
+        let interval = 1.0 / moveSampleFPS
+        let install = { [weak self] in
+            guard let self else { return }
+            // Seed immediately so there's at least one image before the first tick.
+            self.refreshCursorOnMain()
+            let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+                self?.refreshCursorOnMain()
+            }
+            timer.tolerance = interval * 0.25
+            self.cursorRefreshTimer = timer
+        }
+        if Thread.isMainThread {
+            install()
+        } else {
+            DispatchQueue.main.async(execute: install)
+        }
+    }
+
     /// Snapshots the current system cursor and stores it keyed by a content hash
     /// so each distinct shape is recorded once (the Electron tracker did the same
-    /// with a SHA-1 of the cursor bytes). Returns the key for the current cursor.
-    @discardableResult
-    private func captureCurrentCursor() -> String {
+    /// with a SHA-1 of the cursor bytes). MUST run on the main thread.
+    private func refreshCursorOnMain() {
         let cursor = NSCursor.currentSystem ?? NSCursor.current
         let image = cursor.image
         let hotSpot = cursor.hotSpot
 
-        guard let rgba = Self.rgbaBytes(from: image) else {
-            lock.lock(); defer { lock.unlock() }
-            return lastCursorKey
-        }
+        guard let rgba = Self.rgbaBytes(from: image) else { return }
         let key = Self.contentKey(width: rgba.width, height: rgba.height, bytes: rgba.bytes)
+
+        // The hotspot is reported in points but the RGBA bitmap is in backing
+        // pixels (Retina cursors render at 2x). Scale the hotspot into pixel space
+        // so the editor's pixel-space hotspot subtraction lands on the cursor tip.
+        let pointWidth = image.size.width
+        let pointHeight = image.size.height
+        let xScale = pointWidth > 0 ? CGFloat(rgba.width) / pointWidth : 1
+        let yScale = pointHeight > 0 ? CGFloat(rgba.height) / pointHeight : 1
 
         lock.lock()
         lastCursorKey = key
@@ -357,13 +416,12 @@ public final class MouseTracker: @unchecked Sendable {
             cursorImages[key] = CapturedCursorImage(
                 width: rgba.width,
                 height: rgba.height,
-                xhot: Int(hotSpot.x.rounded()),
-                yhot: Int(hotSpot.y.rounded()),
+                xhot: Int((hotSpot.x * xScale).rounded()),
+                yhot: Int((hotSpot.y * yScale).rounded()),
                 image: rgba.bytes
             )
         }
         lock.unlock()
-        return key
     }
 
     // MARK: - Coordinate + time helpers
