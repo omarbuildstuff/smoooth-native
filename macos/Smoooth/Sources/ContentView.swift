@@ -5,21 +5,35 @@ import SmooothCore
 
 struct ContentView: View {
     @State private var model = EditorModel()
+    @StateObject private var recorder = RecordingCoordinator()
     @State private var screen: Screen = .home
 
-    enum Screen { case home, editor }
+    enum Screen { case home, recorder, editor }
 
     var body: some View {
         Group {
             switch screen {
             case .home:
-                HomeView(onImport: importVideo)
+                HomeView(onImport: importVideo, onRecord: { screen = .recorder })
+            case .recorder:
+                RecorderView(coordinator: recorder,
+                             onFinished: { result in loadRecording(result) },
+                             onCancel: { screen = .home })
             case .editor:
                 EditorView(model: model)
             }
         }
         .frame(minWidth: 1100, minHeight: 740)
         .preferredColorScheme(model.mode == "dark" ? .dark : .light)
+    }
+
+    private func loadRecording(_ result: RecordingResult) {
+        Task {
+            await model.loadProject(videoURL: result.screenVideoURL,
+                                    metadataURL: result.metadataURL,
+                                    webcamVideoURL: result.webcamVideoURL)
+            screen = .editor
+        }
     }
 
     private func importVideo() {
@@ -37,6 +51,7 @@ struct ContentView: View {
 
 struct HomeView: View {
     let onImport: () -> Void
+    let onRecord: () -> Void
 
     var body: some View {
         VStack(spacing: 24) {
@@ -44,10 +59,14 @@ struct HomeView: View {
             Text("Smoooth").font(.system(size: 40, weight: .bold))
             Text("Cinematic screen recording for macOS").foregroundStyle(.secondary)
             HStack(spacing: 16) {
+                Button { onRecord() } label: {
+                    Label("New Recording", systemImage: "record.circle")
+                        .frame(width: 160, height: 40)
+                }.buttonStyle(.borderedProminent)
                 Button { onImport() } label: {
                     Label("Open Video…", systemImage: "folder")
                         .frame(width: 160, height: 40)
-                }.buttonStyle(.borderedProminent)
+                }
             }
             Text("Recording uses ScreenCaptureKit + cinematic auto-zoom.")
                 .font(.caption).foregroundStyle(.secondary)

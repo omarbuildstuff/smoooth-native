@@ -171,7 +171,7 @@ public final class RecordingCoordinator: ObservableObject {
 
         // Build + write metadata, rebasing timestamps to the first video frame.
         let drained = tracker?.drain() ?? (samples: [], cursors: [:])
-        let metadata = RecordingMetadata.build(
+        let metadata = RecordingMetadataWriter.build(
             samples: drained.samples,
             cursors: drained.cursors,
             geometry: geometry,
@@ -183,7 +183,7 @@ public final class RecordingCoordinator: ObservableObject {
         } catch {
             // Write a minimal fallback so the editor doesn't crash (parity with
             // the Electron error path that writes empty metadata).
-            let fallback = RecordingMetadata(
+            let fallback = RecordingMetadataWriter(
                 platform: "darwin",
                 screenSize: primaryScreenPixelSize(),
                 geometry: geometry,

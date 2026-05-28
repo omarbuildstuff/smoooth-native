@@ -73,11 +73,87 @@ public final class VideoExporter: @unchecked Sendable {
         if job.settings.format == .gif {
             try await exportGIF(renderFrame: renderFrame, totalFrames: totalFrames, fps: fps,
                                 outputURL: job.outputURL, progress: progress)
+            return job.outputURL
+        }
+
+        // Video first (to a temp file), then best-effort mux remapped source audio.
+        let tempVideo = job.outputURL.deletingPathExtension().appendingPathExtension("video.mp4")
+        try? FileManager.default.removeItem(at: tempVideo)
+        try await exportMP4(renderFrame: renderFrame, totalFrames: totalFrames, fps: fps,
+                            dims: dims, outputURL: tempVideo, progress: progress)
+
+        if await mainSource.hasAudio() {
+            do {
+                try await muxAudio(videoOnly: tempVideo, sourceVideo: job.mainVideoURL,
+                                   duration: job.duration, cutRegions: job.cutRegions,
+                                   speedRegions: job.speedRegions, output: job.outputURL)
+                try? FileManager.default.removeItem(at: tempVideo)
+            } catch {
+                // Audio mux failed — keep the (valid) video-only output.
+                try? FileManager.default.removeItem(at: job.outputURL)
+                try FileManager.default.moveItem(at: tempVideo, to: job.outputURL)
+            }
         } else {
-            try await exportMP4(renderFrame: renderFrame, totalFrames: totalFrames, fps: fps,
-                                dims: dims, outputURL: job.outputURL, progress: progress)
+            try? FileManager.default.removeItem(at: job.outputURL)
+            try FileManager.default.moveItem(at: tempVideo, to: job.outputURL)
         }
         return job.outputURL
+    }
+
+    // MARK: - Audio mux (cut/speed-aware)
+
+    private func muxAudio(videoOnly: URL, sourceVideo: URL, duration: Double,
+                          cutRegions: [String: CutRegion], speedRegions: [String: SpeedRegion],
+                          output: URL) async throws {
+        let comp = AVMutableComposition()
+        let videoAsset = AVURLAsset(url: videoOnly)
+        guard let vTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+              let compV = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw ExportError.writeFailed("audio mux: video track")
+        }
+        let vDur = try await videoAsset.load(.duration)
+        try compV.insertTimeRange(CMTimeRange(start: .zero, duration: vDur), of: vTrack, at: .zero)
+
+        let srcAsset = AVURLAsset(url: sourceVideo)
+        let hasSpeed = !speedRegions.isEmpty
+        if let aTrack = try await srcAsset.loadTracks(withMediaType: .audio).first,
+           let compA = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            // Same segment walk as TimeRemap: drop cuts, scale speed regions.
+            let cuts = Array(cutRegions.values), speeds = Array(speedRegions.values)
+            var events = Set<Double>([0, duration])
+            for r in cuts { events.insert(r.startTime); events.insert(r.startTime + r.duration) }
+            for r in speeds { events.insert(r.startTime); events.insert(r.startTime + r.duration) }
+            let sorted = events.sorted().filter { $0 >= 0 && $0 <= duration }
+            var cursor = CMTime.zero
+            for i in 0..<max(0, sorted.count - 1) {
+                let segStart = sorted[i], segEnd = sorted[i + 1]
+                let mid = segStart + (segEnd - segStart) / 2
+                if cuts.contains(where: { mid >= $0.startTime && mid < $0.startTime + $0.duration }) { continue }
+                let speed = speeds.first(where: { mid >= $0.startTime && mid < $0.startTime + $0.duration })?.speed ?? 1
+                let range = CMTimeRange(start: CMTime(seconds: segStart, preferredTimescale: 600),
+                                        duration: CMTime(seconds: segEnd - segStart, preferredTimescale: 600))
+                try compA.insertTimeRange(range, of: aTrack, at: cursor)
+                if speed != 1 {
+                    let scaledDur = CMTime(seconds: (segEnd - segStart) / speed, preferredTimescale: 600)
+                    compA.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: scaledDur)
+                    cursor = cursor + scaledDur
+                } else {
+                    cursor = cursor + range.duration
+                }
+            }
+        }
+
+        let preset = hasSpeed ? AVAssetExportPresetHighestQuality : AVAssetExportPresetPassthrough
+        guard let session = AVAssetExportSession(asset: comp, presetName: preset) else {
+            throw ExportError.writeFailed("audio mux: export session")
+        }
+        try? FileManager.default.removeItem(at: output)
+        session.outputURL = output
+        session.outputFileType = .mp4
+        await session.export()
+        if session.status != .completed {
+            throw ExportError.writeFailed("audio mux: \(session.error?.localizedDescription ?? "export failed")")
+        }
     }
 
     // MARK: - MP4

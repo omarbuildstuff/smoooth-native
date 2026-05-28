@@ -16,7 +16,7 @@ import SmooothCore
 ///
 /// The `events` array decodes cleanly into `[SmooothCore.MetaDataItem]` and the
 /// whole document round-trips through `JSONDecoder`.
-struct RecordingMetadata: Codable {
+struct RecordingMetadataWriter: Codable {
     var platform: String
     var screenSize: SizeI
     var geometry: RecordingGeometry
@@ -33,7 +33,7 @@ struct RecordingMetadata: Codable {
     }
 }
 
-extension RecordingMetadata {
+extension RecordingMetadataWriter {
     /// Builds the document from captured samples + cursor images.
     ///
     /// - `samples`: raw global samples (absolute seconds, physical-pixel coords).
@@ -51,7 +51,7 @@ extension RecordingMetadata {
                       cursors: [String: CapturedCursorImage],
                       geometry: RecordingGeometry,
                       screenSize: SizeI,
-                      videoStartWallClock: Double?) -> RecordingMetadata {
+                      videoStartWallClock: Double?) -> RecordingMetadataWriter {
         let originX = Double(geometry.x)
         let originY = Double(geometry.y)
         let maxX = originX + Double(geometry.width)
@@ -102,7 +102,7 @@ extension RecordingMetadata {
             )
         }
 
-        return RecordingMetadata(
+        return RecordingMetadataWriter(
             platform: "darwin",
             screenSize: screenSize,
             geometry: geometry,
