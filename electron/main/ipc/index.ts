@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron'
+import log from 'electron-log/main'
 import * as appHandlers from './handlers/app'
 import * as desktopHandlers from './handlers/desktop'
 import * as exportHandlers from './handlers/export'
@@ -57,4 +58,9 @@ export function registerIpcHandlers() {
   // Shell
   ipcMain.on('shell:showItemInFolder', shellHandlers.showItemInFolder)
   ipcMain.on('shell:openExternal', shellHandlers.openExternal)
+
+  // Webcam lifecycle
+  ipcMain.on('recorder:webcam-released', () => {
+    log.info('[IPC] Renderer released webcam stream.')
+  })
 }

@@ -72,9 +72,13 @@ export async function startScreenCapture(opts: StartScreenCaptureOptions): Promi
     if (sources.length === 0) {
       throw new Error('No screen sources available — Screen Recording permission may be denied.')
     }
-    const targetSource =
-      (opts.displayId !== undefined && sources.find((s) => s.display_id === String(opts.displayId))) ||
-      sources[0]
+    let targetSource
+    if (opts.displayId !== undefined) {
+      targetSource = sources.find((s) => s.display_id === String(opts.displayId)) ?? sources[0]
+    } else {
+      // No displayId (area recording) — use first source (typically primary display)
+      targetSource = sources[0]
+    }
 
     // 2. Capture screen video. The cast is required because Chromium's
     //    legacy chromeMediaSource constraint is not in lib.dom.d.ts.
@@ -102,27 +106,26 @@ export async function startScreenCapture(opts: StartScreenCaptureOptions): Promi
         let loopbackStream: MediaStream | null = null
         try {
           loopbackStream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true })
-        } finally {
-          await api.disableLoopbackAudio()
-        }
 
-        // Drop the duplicate video track from the loopback stream — we keep
-        // only the audio track and add it to our screen stream.
-        loopbackStream.getVideoTracks().forEach((track) => {
-          try {
-            track.stop()
-          } catch {
-            // ignore
+          // Process tracks BEFORE disableLoopbackAudio runs in finally
+          loopbackStream.getVideoTracks().forEach((track) => {
+            try {
+              track.stop()
+            } catch {
+              // ignore
+            }
+            loopbackStream!.removeTrack(track)
+          })
+
+          const audioTrack = loopbackStream.getAudioTracks()[0]
+          if (audioTrack) {
+            videoStream!.addTrack(audioTrack)
+            hasSystemAudio = true
+          } else {
+            console.warn('[ScreenCapture] Loopback returned no audio track; continuing without system audio.')
           }
-          loopbackStream!.removeTrack(track)
-        })
-
-        const audioTrack = loopbackStream.getAudioTracks()[0]
-        if (audioTrack) {
-          videoStream.addTrack(audioTrack)
-          hasSystemAudio = true
-        } else {
-          console.warn('[ScreenCapture] Loopback returned no audio track; continuing without system audio.')
+        } finally {
+          await api.disableLoopbackAudio()  // now runs AFTER we have the audio track
         }
       } catch (err) {
         console.error('[ScreenCapture] System audio loopback failed; continuing without system audio:', err)

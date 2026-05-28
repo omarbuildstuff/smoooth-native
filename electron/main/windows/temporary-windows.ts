@@ -1,6 +1,6 @@
 // Logic to create temporary windows like countdown, saving, selection.
 
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, screen } from 'electron'
 import path from 'node:path'
 import { appState } from '../state'
 import { VITE_DEV_SERVER_URL, RENDERER_DIST, PRELOAD_SCRIPT } from '../lib/constants'
@@ -47,7 +47,11 @@ export function createSavingWindow() {
 }
 
 export function createSelectionWindow() {
-  appState.selectionWin = createTemporaryWindow({ fullscreen: true }, 'selection/index.html')
+  const { bounds } = screen.getPrimaryDisplay()
+  appState.selectionWin = createTemporaryWindow(
+    { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+    'selection/index.html',
+  )
 
   appState.selectionWin.on('closed', () => {
     appState.selectionWin = null

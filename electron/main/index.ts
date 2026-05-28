@@ -20,7 +20,9 @@ setupLogging()
 // 14.4+ via CoreAudio Taps with `forceCoreAudioTap: true`). Must run before
 // `app.whenReady()` because it appends Chromium feature flags.
 // See: https://github.com/alectrocute/electron-audio-loopback
-initAudioLoopback({ forceCoreAudioTap: true })
+if (process.platform === 'darwin') {
+  initAudioLoopback({ forceCoreAudioTap: true })
+}
 
 // --- App Lifecycle Events ---
 app.on('window-all-closed', () => {
@@ -99,15 +101,6 @@ app.whenReady().then(async () => {
   // Initialize platform-specific dependencies asynchronously
   initializeMouseTrackerDependencies()
 
-  // Proactively register this app with macOS Screen Recording TCC so it
-  // appears in System Settings → Privacy & Security → Screen Recording.
-  // This must run after the window is ready.
-  if (process.platform === 'darwin') {
-    desktopCapturer.getSources({ types: ['screen'] }).catch((e) => {
-      log.warn('[Permission] desktopCapturer.getSources failed at startup:', e)
-    })
-  }
-
   // Register custom protocol for media files
   protocol.registerFileProtocol(
     'media',
@@ -129,4 +122,14 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers()
   createRecorderWindow()
+
+  // Proactively register this app with macOS Screen Recording TCC so it
+  // appears in System Settings → Privacy & Security → Screen Recording.
+  // Must run after createRecorderWindow() so the TCC prompt has an active
+  // window to attach to.
+  if (process.platform === 'darwin') {
+    desktopCapturer.getSources({ types: ['screen'] }).catch((e) => {
+      log.warn('[Permission] desktopCapturer.getSources failed at startup:', e)
+    })
+  }
 })

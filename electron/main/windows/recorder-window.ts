@@ -62,23 +62,28 @@ export function createRecorderWindow() {
   })
 
   // This simple IPC handler can stay here as it's tightly coupled to this window.
-  ipcMain.on('recorder:set-size', (_event, { width, height }: { width: number; height: number }) => {
-    if (appState.recorderWin) {
-      log.info(`Resizing recorder window to ${width}x${height}`)
-      appState.recorderWin.setSize(width, height, true)
-    }
-  })
+  // Guard with listenerCount to avoid duplicate handlers when the window is re-created.
+  if (ipcMain.listenerCount('recorder:set-size') === 0) {
+    ipcMain.on('recorder:set-size', (_event, { width, height }: { width: number; height: number }) => {
+      if (appState.recorderWin) {
+        log.info(`Resizing recorder window to ${width}x${height}`)
+        appState.recorderWin.setSize(width, height, true)
+      }
+    })
+  }
 
-  ipcMain.on('recorder:click-through', () => {
-    const win = appState.recorderWin
-    if (win && !win.isDestroyed()) {
-      // Use Electron's built-in solution for Windows & macOS
-      win.setIgnoreMouseEvents(true, { forward: true })
-      setTimeout(() => {
-        if (win && !win.isDestroyed()) {
-          win.setIgnoreMouseEvents(false)
-        }
-      }, 100)
-    }
-  })
+  if (ipcMain.listenerCount('recorder:click-through') === 0) {
+    ipcMain.on('recorder:click-through', () => {
+      const win = appState.recorderWin
+      if (win && !win.isDestroyed()) {
+        // Use Electron's built-in solution for Windows & macOS
+        win.setIgnoreMouseEvents(true, { forward: true })
+        setTimeout(() => {
+          if (win && !win.isDestroyed()) {
+            win.setIgnoreMouseEvents(false)
+          }
+        }, 100)
+      }
+    })
+  }
 }
