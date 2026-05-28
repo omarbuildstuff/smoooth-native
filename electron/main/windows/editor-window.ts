@@ -14,7 +14,7 @@ import { VITE_DEV_SERVER_URL, RENDERER_DIST, PRELOAD_SCRIPT } from '../lib/const
 import { createEditorMenu, clearMenu } from '../features/app-menu'
 import { RecordingGeometry } from '../state'
 
-const store = new Store() // Can be configured with schema if needed
+const store = new Store({ name: 'app' })
 
 export function createEditorWindow(
   videoPath: string,
