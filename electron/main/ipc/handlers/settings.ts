@@ -3,7 +3,7 @@
 
 import Store from 'electron-store'
 
-const store = new Store() // Should be initialized once and exported if needed elsewhere
+const store = new Store({ name: 'app' }) // Should be initialized once and exported if needed elsewhere
 
 export function loadPresets() {
   return store.get('presets', {})
