@@ -32,22 +32,25 @@ export function createEditorWindow(
   appState.currentEditorSessionFiles = { screenVideoPath: videoPath, metadataPath, recordingGeometry, webcamVideoPath }
   log.info('[EditorWindow] Stored session files for cleanup:', appState.currentEditorSessionFiles)
 
+  const appearance = store.get('appearance') as { mode?: 'light' | 'dark' } | undefined
+  const isDarkMode = appearance?.mode === 'dark'
   const isWindows = process.platform === 'win32'
   let titleBarOptions = {}
 
   if (isWindows) {
-    const appearance = store.get('appearance') as { mode?: 'light' | 'dark' } | undefined
-    const isDarkMode = appearance?.mode === 'dark'
-
     titleBarOptions = {
       titleBarStyle: 'hidden',
       titleBarOverlay: {
-        color: isDarkMode ? '#1D2025' : '#F9FAFB', // Matches dark/light card/sidebar background
+        color: isDarkMode ? '#1D2025' : '#F9FAFB',
         symbolColor: isDarkMode ? '#EEEEEE' : '#333333',
-        height: 48, // h-12 in Tailwind
+        height: 48,
       },
     }
   }
+
+  // Match the CSS background so macOS doesn't draw a compositor border around
+  // the frameless window (light: hsl(0 0% 98%) ≈ #fafafa, dark: hsl(220 25% 6%) ≈ #0d1117).
+  const backgroundColor = isDarkMode ? '#0d1117' : '#fafafa'
 
   appState.editorWin = new BrowserWindow({
     icon: path.join(process.env.VITE_PUBLIC!, 'smoooth-appicon.png'),
@@ -56,8 +59,9 @@ export function createEditorWindow(
     minWidth: 1280,
     minHeight: 720,
     frame: false,
-    titleBarStyle: 'hidden', // Keep hidden for all platforms
-    ...titleBarOptions, // Apply Windows-specific overlay
+    titleBarStyle: 'hidden',
+    backgroundColor,
+    ...titleBarOptions,
     show: false,
     webPreferences: {
       preload: PRELOAD_SCRIPT,

@@ -1,64 +1,71 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 type Device = { id: string; name: string }
 
 /**
  * Custom hook to manage loading and reloading of media devices (webcams, microphones).
- * It handles platform-specific logic (dshow on Windows) and provides a unified interface.
  *
- * @returns An object containing device lists, loading status, platform info, and a reload function.
+ * Key design notes:
+ * - Platform is stored in a ref (not state) to avoid a re-render loop:
+ *   state update → new fetchDevices → new loadAll → useEffect re-fires → repeat.
+ * - getUserMedia is called once (combined audio+video) rather than once per device
+ *   type, so macOS only shows one permission prompt instead of two.
  */
 export const useDeviceManager = () => {
   const [platform, setPlatform] = useState<NodeJS.Platform | null>(null)
+  const platformRef = useRef<NodeJS.Platform | null>(null)
   const [webcams, setWebcams] = useState<Device[]>([])
   const [mics, setMics] = useState<Device[]>([])
   const [isInitializing, setIsInitializing] = useState(true)
 
-  /**
-   * Fetches devices of a specific kind, handling platform differences.
-   */
-  const fetchDevices = useCallback(
-    async (kind: 'videoinput' | 'audioinput') => {
-      const currentPlatform = platform ?? (await window.electronAPI.getPlatform())
-      if (!platform) setPlatform(currentPlatform)
-
-      if (currentPlatform === 'win32') {
-        const { video, audio } = await window.electronAPI.getDshowDevices()
-        return (kind === 'videoinput' ? video : audio).map((d) => ({ id: d.alternativeName, name: d.name }))
-      }
-
-      try {
-        // Request permission to ensure device labels are available
-        const stream = await navigator.mediaDevices.getUserMedia({ [kind === 'videoinput' ? 'video' : 'audio']: true })
-        stream.getTracks().forEach((track) => track.stop())
-      } catch (err) {
-        console.warn(`Could not get media permissions for ${kind}:`, err)
-      }
-      const allDevices = await navigator.mediaDevices.enumerateDevices()
-      return allDevices
-        .filter((d) => d.kind === kind)
-        .map((d) => ({ id: d.deviceId, name: d.label || `Unnamed ${kind === 'videoinput' ? 'Webcam' : 'Microphone'}` }))
-    },
-    [platform],
-  )
-
-  /**
-   * Loads all devices concurrently.
-   */
   const loadAll = useCallback(async () => {
     setIsInitializing(true)
     try {
-      const [fetchedWebcams, fetchedMics] = await Promise.all([fetchDevices('videoinput'), fetchDevices('audioinput')])
-      setWebcams(fetchedWebcams)
-      setMics(fetchedMics)
+      if (!platformRef.current) {
+        platformRef.current = await window.electronAPI.getPlatform()
+        setPlatform(platformRef.current)
+      }
+      const currentPlatform = platformRef.current!
+
+      if (currentPlatform === 'win32') {
+        const { video, audio } = await window.electronAPI.getDshowDevices()
+        setWebcams(video.map((d) => ({ id: d.alternativeName, name: d.name })))
+        setMics(audio.map((d) => ({ id: d.alternativeName, name: d.name })))
+        return
+      }
+
+      // Single getUserMedia call so macOS only fires one permission prompt.
+      // Try audio+video together; fall back to audio-only if no camera is present.
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+        stream.getTracks().forEach((track) => track.stop())
+      } catch {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          stream.getTracks().forEach((track) => track.stop())
+        } catch (err) {
+          console.warn('Could not get media permissions:', err)
+        }
+      }
+
+      const allDevices = await navigator.mediaDevices.enumerateDevices()
+      setWebcams(
+        allDevices
+          .filter((d) => d.kind === 'videoinput')
+          .map((d) => ({ id: d.deviceId, name: d.label || 'Unnamed Webcam' })),
+      )
+      setMics(
+        allDevices
+          .filter((d) => d.kind === 'audioinput')
+          .map((d) => ({ id: d.deviceId, name: d.label || 'Unnamed Microphone' })),
+      )
     } catch (error) {
       console.error('Failed to load devices:', error)
     } finally {
       setIsInitializing(false)
     }
-  }, [fetchDevices])
+  }, []) // stable ref — no external deps that cause re-runs
 
-  // Initial load on mount
   useEffect(() => {
     loadAll()
   }, [loadAll])
