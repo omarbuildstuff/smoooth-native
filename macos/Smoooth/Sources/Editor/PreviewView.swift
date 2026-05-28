@@ -42,6 +42,7 @@ struct PreviewView: NSViewRepresentable {
         private var configuredWebcamURL: URL?
         private var lastMain: CGImage?
         private var lastWebcam: CGImage?
+        private var lastClockWriteback: Double = -1
         private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
         init(model: EditorModel) { self.model = model }
@@ -96,15 +97,20 @@ struct PreviewView: NSViewRepresentable {
 
             // Clock
             if model.isPlaying {
+                let target = CMTime(seconds: model.currentTime, preferredTimescale: 600)
                 if player.timeControlStatus != .playing {
-                    player.seek(to: CMTime(seconds: model.currentTime, preferredTimescale: 600),
-                                toleranceBefore: .zero, toleranceAfter: .zero)
+                    player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
                     player.play()
-                    webcamPlayer?.seek(to: CMTime(seconds: model.currentTime, preferredTimescale: 600))
+                    webcamPlayer?.seek(to: target)
                     webcamPlayer?.play()
+                } else if abs(model.currentTime - lastClockWriteback) > 0.1 {
+                    // currentTime changed externally during playback (scrub/seek) → re-seek the clock.
+                    player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+                    webcamPlayer?.seek(to: target)
                 }
                 let t = CMTimeGetSeconds(player.currentTime())
                 model.currentTime = t
+                lastClockWriteback = t
                 if t >= model.duration, model.duration > 0 {
                     model.pause(); player.pause(); webcamPlayer?.pause()
                 }

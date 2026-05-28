@@ -21,6 +21,7 @@ final class EditorModel {
     var recordingGeometry: RectD?
     var screenSize: SizeD?
     var duration: Double = 0
+    var sourceFPS: Double = 30
     var metadata: [MetaDataItem] = []
     var cursorBitmaps: [String: CursorBitmap] = [:]
     var hasAudioTrack = false
@@ -95,7 +96,7 @@ final class EditorModel {
         self.webcamVideoURL = webcamVideoURL
 
         if let meta = try? RecordingMetadata.load(metadataURL) {
-            metadata = meta.events.map { var e = $0; return e }.sorted { $0.timestamp < $1.timestamp }
+            metadata = meta.events.sorted { $0.timestamp < $1.timestamp }
             recordingGeometry = meta.recordingGeometry
             cursorBitmaps = meta.cursorBitmaps()
             if let s = meta.screenSize { screenSize = SizeD(width: s.width, height: s.height) }
@@ -107,13 +108,15 @@ final class EditorModel {
             recordingGeometry = RectD(x: 0, y: 0, width: videoDimensions.width, height: videoDimensions.height)
         }
         if let dur = try? await source.duration() { duration = dur }
+        sourceFPS = await source.nominalFrameRate()
         hasAudioTrack = await source.hasAudio()
 
         initializePresets()
-        let n = generateZoomRegionsFromClicks()
-        if n == 0 { /* no clicks → no auto zooms */ }
+        _ = generateZoomRegionsFromClicks()
         currentTime = 0
         refreshBackgroundImage()
+        // A freshly loaded project has no undo history (auto-zoom is part of load).
+        undoManager.removeAllActions()
     }
 
     // MARK: - Undo
@@ -162,6 +165,22 @@ final class EditorModel {
         mutate()
         registerUndo(from: before)
         undoManager.setActionName(label)
+    }
+
+    // Interactive (drag) edits: one snapshot at gesture start, one undo at end.
+    @ObservationIgnored private var interactiveSnapshot: DocSnapshot?
+
+    func beginInteractiveEdit() { if interactiveSnapshot == nil { interactiveSnapshot = snapshot() } }
+    func endInteractiveEdit(_ label: String = "Move Region") {
+        guard let before = interactiveSnapshot else { return }
+        interactiveSnapshot = nil
+        registerUndo(from: before)
+        undoManager.setActionName(label)
+    }
+    func setRegionStartLive(_ id: String, _ start: Double) {
+        if zoomRegions[id] != nil { zoomRegions[id]!.startTime = start }
+        else if cutRegions[id] != nil { cutRegions[id]!.startTime = start }
+        else if speedRegions[id] != nil { speedRegions[id]!.startTime = start }
     }
 
     // MARK: - Frame / background
@@ -400,7 +419,7 @@ final class EditorModel {
         currentTime = min(max(0, time), max(0, duration))
     }
 
-    func seekFrames(_ delta: Int, fps: Double = 30) {
-        seek(to: currentTime + Double(delta) / fps)
+    func seekFrames(_ delta: Int) {
+        seek(to: currentTime + Double(delta) / max(1, sourceFPS))
     }
 }

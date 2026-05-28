@@ -112,7 +112,7 @@ private struct GeneralPanel: View {
     }
     private func bgColorBinding(_ key: WritableKeyPath<Background, String?>, default def: String) -> Binding<Color> {
         Binding(get: { Color(rgbaString: model.frameStyles.background[keyPath: key] ?? def) },
-                set: { c in model.updateBackground { $0[keyPath: key] = c.hexString() } })
+                set: { c in model.updateBackground { $0[keyPath: key] = c.rgbaString() } })
     }
 }
 
@@ -120,7 +120,11 @@ private struct GeneralPanel: View {
 
 private struct CameraPanel: View {
     @Bindable var model: EditorModel
-    private let positions: [[WebcamPos]] = [[.topLeft, .topCenter, .topRight], [.leftCenter, .bottomCenter, .rightCenter], [.bottomLeft, .bottomCenter, .bottomRight]]
+    private let positions: [[WebcamPos?]] = [
+        [.topLeft, .topCenter, .topRight],
+        [.leftCenter, nil, .rightCenter],
+        [.bottomLeft, .bottomCenter, .bottomRight],
+    ]
 
     var body: some View {
         PanelSection(title: "Camera") {
@@ -137,12 +141,16 @@ private struct CameraPanel: View {
         PanelSection(title: "Position") {
             ForEach(0..<3) { row in
                 HStack {
-                    ForEach(positions[row], id: \.self) { pos in
-                        Button { model.setWebcamPosition(pos) } label: {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(model.webcamPosition == pos ? Color.accentColor : Color.gray.opacity(0.3))
-                                .frame(height: 26)
-                        }.buttonStyle(.plain)
+                    ForEach(0..<3) { col in
+                        if let pos = positions[row][col] {
+                            Button { model.setWebcamPosition(pos) } label: {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(model.webcamPosition == pos ? Color.accentColor : Color.gray.opacity(0.3))
+                                    .frame(height: 26)
+                            }.buttonStyle(.plain)
+                        } else {
+                            RoundedRectangle(cornerRadius: 4).fill(Color.clear).frame(height: 26)
+                        }
                     }
                 }
             }
@@ -199,7 +207,7 @@ private struct AnimationPanel: View {
         PanelSection(title: "Auto Zoom") {
             Button("Regenerate from clicks") { _ = model.generateZoomRegionsFromClicks() }.font(.caption)
         }
-        if let id = model.selectedRegionID, var zoom = model.zoomRegions[id] {
+        if let id = model.selectedRegionID, let zoom = model.zoomRegions[id] {
             PanelSection(title: "Selected Zoom") {
                 LabeledSlider(title: "Zoom Level", value: Binding(get: { zoom.zoomLevel },
                     set: { v in model.updateZoomRegion(id) { $0.zoomLevel = v } }), range: 1...3, step: 0.1, decimals: 1)

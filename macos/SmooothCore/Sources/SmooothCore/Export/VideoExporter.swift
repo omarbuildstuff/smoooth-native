@@ -17,6 +17,7 @@ public final class VideoExporter: @unchecked Sendable {
 
     public func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
     public var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
+    private func resetCancellation() { lock.lock(); _cancelled = false; lock.unlock() }
 
     public struct Job: Sendable {
         public var mainVideoURL: URL
@@ -44,6 +45,7 @@ public final class VideoExporter: @unchecked Sendable {
     }
 
     public func export(_ job: Job, progress: (@Sendable (Double) -> Void)? = nil) async throws -> URL {
+        resetCancellation() // allow re-use after a prior cancel
         let dims = Geometry.exportDimensions(resolution: job.settings.resolution, aspectRatio: job.aspectRatio)
         let exportDur = TimeRemap.exportDuration(job.duration, cutRegions: job.cutRegions, speedRegions: job.speedRegions)
         let fps = max(1, job.settings.fps)

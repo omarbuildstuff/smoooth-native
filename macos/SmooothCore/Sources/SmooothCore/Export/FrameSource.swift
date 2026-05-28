@@ -31,6 +31,13 @@ public final class FrameSource: @unchecked Sendable {
         try await CMTimeGetSeconds(asset.load(.duration))
     }
 
+    /// Nominal frame rate of the first video track (falls back to 30).
+    public func nominalFrameRate() async -> Double {
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let fps = try? await track.load(.nominalFrameRate), fps > 0 else { return 30 }
+        return Double(fps)
+    }
+
     public func hasAudio() async -> Bool {
         ((try? await asset.loadTracks(withMediaType: .audio))?.isEmpty == false)
     }

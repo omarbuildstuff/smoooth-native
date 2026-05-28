@@ -59,10 +59,13 @@ struct TimelineView: View {
                     .frame(width: max(6, r.dur * pps), height: 28)
                     .offset(x: r.start * pps)
                     .onTapGesture { model.selectedRegionID = r.id; selectTab(r.kind) }
-                    .gesture(DragGesture().onChanged { v in
-                        let newStart = max(0, min(model.duration - r.dur, (r.start * pps + v.translation.width) / pps))
-                        move(r, to: newStart)
-                    })
+                    .gesture(DragGesture()
+                        .onChanged { v in
+                            model.beginInteractiveEdit()
+                            let newStart = max(0, min(model.duration - r.dur, (r.start * pps + v.translation.width) / pps))
+                            model.setRegionStartLive(r.id, newStart)
+                        }
+                        .onEnded { _ in model.endInteractiveEdit("Move Region") })
             }
         }
         .frame(height: 30)
@@ -70,14 +73,6 @@ struct TimelineView: View {
 
     private func selectTab(_ kind: Kind) {
         if kind == .zoom || kind == .speed { model.activeSidePanelTab = .animation }
-    }
-
-    private func move(_ r: Region, to start: Double) {
-        switch r.kind {
-        case .zoom: model.updateZoomRegion(r.id) { $0.startTime = start }
-        case .cut: model.updateCutRegion(r.id) { $0.startTime = start }
-        case .speed: model.updateSpeedRegion(r.id) { $0.startTime = start }
-        }
     }
 
     private func timeLabel(_ seconds: Double) -> String {

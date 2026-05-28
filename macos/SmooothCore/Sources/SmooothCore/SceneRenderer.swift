@@ -202,8 +202,11 @@ public enum SceneRenderer {
                 let colors = (direction == "circle-in" ? [end, start] : [start, end]) as CFArray
                 if let g = CGGradient(colorsSpace: srgb, colors: colors, locations: [0, 1]) {
                     let c = CGPoint(x: width / 2, y: height / 2)
+                    // drawsAfter/BeforeEndLocation fills the corners beyond the end radius,
+                    // matching Canvas2D's createRadialGradient clamp behavior.
                     ctx.drawRadialGradient(g, startCenter: c, startRadius: 0, endCenter: c,
-                                           endRadius: max(width, height) / 2, options: [])
+                                           endRadius: max(width, height) / 2,
+                                           options: [.drawsAfterEndLocation, .drawsBeforeStartLocation])
                 }
             } else {
                 let pts = linearGradientPoints(direction, width: width, height: height)
@@ -261,7 +264,7 @@ public enum SceneRenderer {
     static func drawClickRipples(_ ctx: CGContext, model: SceneModel, currentTime: Double,
                                  recordingGeometry: SizeD, frameContentWidth: Double, frameContentHeight: Double) {
         let cs = model.cursorStyles
-        let rippleEasing = Easing.easeOutQuint // "Balanced" ripple in source uses standard ease-out
+        let rippleEasing = Easing.easeInOutQuint // matches source: EASING_MAP.Balanced (easeInOutQuint)
         let clicks = model.metadata.filter {
             $0.type == .click && ($0.pressed ?? false)
                 && currentTime >= $0.timestamp && currentTime < $0.timestamp + cs.clickRippleDuration
