@@ -61,6 +61,8 @@ const usageStrings = {
     'Smoooth records from the microphone when you enable it during a recording.',
   NSCameraUsageDescription:
     'Smoooth accesses the camera when you enable webcam capture during a recording.',
+  NSSystemAudioUsageDescription:
+    'Smoooth captures system audio so you can include it in your screen recordings.',
 }
 
 // Identity overrides. Out of the box the dev Electron binary identifies

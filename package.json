@@ -127,14 +127,14 @@
       "x64ArchFiles": "*",
       "minimumSystemVersion": "12.3.0",
       "category": "public.app-category.video",
-      "type": null,
       "entitlements": "resources/entitlements.mac.plist",
       "entitlementsInherit": "resources/entitlements.mac.plist",
       "extendInfo": {
         "NSScreenCaptureUsageDescription": "Smoooth needs to record your computer's screen to capture video.",
         "NSAudioCaptureUsageDescription": "Smoooth captures system audio so you can include it in your screen recordings.",
         "NSMicrophoneUsageDescription": "Smoooth records from the microphone when you enable it during a recording.",
-        "NSCameraUsageDescription": "Smoooth accesses the camera when you enable webcam capture during a recording."
+        "NSCameraUsageDescription": "Smoooth accesses the camera when you enable webcam capture during a recording.",
+        "NSSystemAudioUsageDescription": "Smoooth captures system audio so you can include it in your screen recordings."
       },
       "target": [
         {
