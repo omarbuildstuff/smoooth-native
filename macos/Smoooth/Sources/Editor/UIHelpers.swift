@@ -43,6 +43,7 @@ extension NSColor {
 
 /// A labeled slider row with a trailing numeric readout.
 struct LabeledSlider: View {
+    @Environment(\.theme) private var theme
     let title: String
     @Binding var value: Double
     let range: ClosedRange<Double>
@@ -50,25 +51,78 @@ struct LabeledSlider: View {
     var decimals: Int = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title).font(.caption)
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.foreground)
                 Spacer()
-                Text(String(format: "%.\(decimals)f", value)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text(String(format: "%.\(decimals)f", value))
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(theme.mutedForeground)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(theme.muted)
+                    .clipShape(RoundedRectangle(cornerRadius: theme.radiusSm, style: .continuous))
             }
             Slider(value: $value, in: range, step: step)
+                .tint(theme.primary)
+                .controlSize(.small)
         }
     }
 }
 
+/// A titled group of controls inside the side panel. Header is a small-caps
+/// muted label, contents sit on a subtle card surface.
 struct PanelSection<Content: View>: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    var icon: String? = nil
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.primary)
+                }
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(theme.mutedForeground)
+            }
+            VStack(alignment: .leading, spacing: 12) { content }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .cardSurface(theme)
+        }
+    }
+}
+
+/// A small toggle row themed to the panel (label left, switch right).
+struct PanelToggle: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    @Binding var isOn: Bool
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.foreground)
+        }
+        .toggleStyle(.switch)
+        .tint(theme.primary)
+        .controlSize(.small)
+    }
+}
+
+/// A labeled menu/picker row (label left, control right) themed to the panel.
+struct PanelRow<Content: View>: View {
+    @Environment(\.theme) private var theme
     let title: String
     @ViewBuilder var content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary)
+        HStack {
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(theme.foreground)
+            Spacer()
             content
         }
-        .padding(.vertical, 6)
     }
 }

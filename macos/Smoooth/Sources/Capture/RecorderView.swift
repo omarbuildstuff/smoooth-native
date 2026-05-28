@@ -9,6 +9,8 @@ struct RecorderView: View {
     var onFinished: (RecordingResult) -> Void
     var onCancel: () -> Void
 
+    @Environment(\.theme) private var theme
+
     @State private var captureSystemAudio = false
     @State private var captureMic = false
     @State private var captureWebcam = false
@@ -18,65 +20,101 @@ struct RecorderView: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        VStack(spacing: 18) {
-            Text("New Recording").font(.title2.bold())
+        ZStack {
+            theme.background.ignoresSafeArea()
 
-            if coordinator.state == .recording {
-                recordingControls
-            } else {
-                optionsForm
-            }
+            VStack(spacing: 18) {
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous).fill(theme.primary.opacity(0.12))
+                        Image(systemName: "record.circle").font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.primary)
+                    }
+                    .frame(width: 36, height: 36)
+                    Text("New Recording").font(.system(size: 18, weight: .bold)).foregroundStyle(theme.foreground)
+                }
 
-            if let errorMessage {
-                Text(errorMessage).font(.caption).foregroundStyle(.red).multilineTextAlignment(.center)
+                if coordinator.state == .recording {
+                    recordingControls
+                } else {
+                    optionsForm
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 12)).foregroundStyle(theme.destructive)
+                        .multilineTextAlignment(.center)
+                }
             }
+            .padding(28)
+            .frame(width: 460)
+            .background(theme.card)
+            .clipShape(RoundedRectangle(cornerRadius: theme.radiusXl, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.radiusXl, style: .continuous).strokeBorder(theme.border, lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.3), radius: 24, x: 0, y: 12)
         }
-        .padding(28)
-        .frame(width: 420)
         .onAppear { coordinator.enumerateDevices() }
     }
 
     private var optionsForm: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Toggle("System audio", isOn: $captureSystemAudio)
-            Toggle("Microphone", isOn: $captureMic)
+        VStack(alignment: .leading, spacing: 14) {
+            PanelToggle(title: "System audio", isOn: $captureSystemAudio)
+            PanelToggle(title: "Microphone", isOn: $captureMic)
             if captureMic {
-                Picker("Mic", selection: $micDeviceID) {
-                    Text("Default").tag(String?.none)
-                    ForEach(coordinator.availableDevices.microphones) { Text($0.name).tag(String?.some($0.id)) }
+                PanelRow(title: "Mic") {
+                    Picker("", selection: $micDeviceID) {
+                        Text("Default").tag(String?.none)
+                        ForEach(coordinator.availableDevices.microphones) { Text($0.name).tag(String?.some($0.id)) }
+                    }.labelsHidden().frame(width: 180)
                 }
             }
-            Toggle("Webcam overlay", isOn: $captureWebcam)
+            PanelToggle(title: "Webcam overlay", isOn: $captureWebcam)
             if captureWebcam {
-                Picker("Camera", selection: $cameraDeviceID) {
-                    Text("Default").tag(String?.none)
-                    ForEach(coordinator.availableDevices.cameras) { Text($0.name).tag(String?.some($0.id)) }
+                PanelRow(title: "Camera") {
+                    Picker("", selection: $cameraDeviceID) {
+                        Text("Default").tag(String?.none)
+                        ForEach(coordinator.availableDevices.cameras) { Text($0.name).tag(String?.some($0.id)) }
+                    }.labelsHidden().frame(width: 180)
                 }
             }
-            Picker("Frame rate", selection: $fps) { Text("30 fps").tag(30); Text("60 fps").tag(60) }
+            PanelRow(title: "Frame rate") {
+                Picker("", selection: $fps) { Text("30 fps").tag(30); Text("60 fps").tag(60) }
+                    .labelsHidden().pickerStyle(.segmented).frame(width: 160)
+            }
 
             HStack {
                 Button("Back") { onCancel() }
+                    .buttonStyle(SoftButtonStyle(theme: theme))
                 Spacer()
                 Button {
                     Task { await startRecording() }
                 } label: {
                     Label("Record Full Screen", systemImage: "record.circle")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(PremiumButtonStyle(theme: theme))
                 .disabled(coordinator.state != .idle)
+                .opacity(coordinator.state != .idle ? 0.5 : 1)
             }
+            .padding(.top, 4)
         }
     }
 
     private var recordingControls: some View {
-        VStack(spacing: 16) {
-            Label("Recording…", systemImage: "record.circle.fill")
-                .foregroundStyle(.red).font(.title3)
-            HStack(spacing: 16) {
+        VStack(spacing: 18) {
+            HStack(spacing: 8) {
+                Circle().fill(theme.destructive).frame(width: 10, height: 10)
+                Text("Recording…").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.destructive)
+            }
+            HStack(spacing: 14) {
                 Button("Cancel") { Task { await coordinator.cancel(); onCancel() } }
-                Button("Stop & Edit") { Task { await stopRecording() } }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(SoftButtonStyle(theme: theme))
+                Button {
+                    Task { await stopRecording() }
+                } label: {
+                    Label("Stop & Edit", systemImage: "stop.fill")
+                }
+                .buttonStyle(PremiumButtonStyle(theme: theme))
             }
         }
     }
