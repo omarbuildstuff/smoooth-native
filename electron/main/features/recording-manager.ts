@@ -17,6 +17,7 @@ import type { RecordingSession, RecordingGeometry } from '../state'
 import { SystemAudioWriter } from './system-audio-writer'
 import { ScreenVideoWriter } from './screen-video-writer'
 import { buildMuxArgs, buildMacMuxArgs } from './build-mux-args'
+import { buildMacAvfoundationInput, buildMacCaptureOutputArgs } from './build-capture-args'
 
 const FFMPEG_PATH = getFFmpegPath()
 const SYSTEM_AUDIO_STOP_TIMEOUT_MS = 5000
@@ -325,16 +326,18 @@ async function startActualRecording(
   const needsFfmpeg = !useRendererScreenCapture || hasMic || hasWebcam
   if (needsFfmpeg) {
     const finalArgs = useRendererScreenCapture
-      ? buildMacFfmpegArgs(inputArgs, hasMic, hasWebcam, micAudioPath, webcamVideoPath)
+      ? buildMacCaptureOutputArgs(inputArgs, hasMic, hasWebcam, micAudioPath, webcamVideoPath)
       : buildFfmpegArgs(inputArgs, hasWebcam, hasMic, screenVideoPath, webcamVideoPath)
     log.info(`[FFMPEG] Starting FFmpeg with args: ${finalArgs.join(' ')}`)
     appState.ffmpegProcess = spawn(FFMPEG_PATH, finalArgs)
 
     // Monitor FFmpeg's stderr for progress, errors, and sync timing
+    let fatalErrorReported = false
     appState.ffmpegProcess.stderr.on('data', (data: any) => {
       const message = data.toString()
       log.warn(`[FFMPEG stderr]: ${message}`)
 
+      if (fatalErrorReported) return
       // Early detection of fatal errors to provide immediate feedback
       const fatalErrorKeywords = [
         'Cannot open display',
@@ -346,6 +349,7 @@ async function startActualRecording(
         'Permission denied',
       ]
       if (fatalErrorKeywords.some((keyword) => message.toLowerCase().includes(keyword.toLowerCase()))) {
+        fatalErrorReported = true
         log.error(`[FFMPEG] Fatal error detected: ${message}`)
         dialog.showErrorBox(
           'Recording Failed',
@@ -422,32 +426,6 @@ function buildFfmpegArgs(
   return finalArgs
 }
 
-/**
- * macOS-only FFmpeg args builder. We capture the screen in the renderer (see
- * src/lib/screen-capture.ts), so this only handles mic and/or webcam. Mic
- * lands in its own AAC/m4a file because there's no longer a screen output to
- * route it into; the post-recording mux folds it back in.
- *
- * Input order in `inputArgs` mirrors `startRecording`: mic first (if any),
- * then webcam (if any).
- */
-function buildMacFfmpegArgs(
-  inputArgs: string[],
-  hasMic: boolean,
-  hasWebcam: boolean,
-  micOut?: string,
-  webcamOut?: string,
-): string[] {
-  const finalArgs = [...inputArgs]
-  // Single combined avfoundation input: stream 0:v = webcam, 0:a = mic.
-  if (hasMic && micOut) {
-    finalArgs.push('-map', '0:a', '-c:a', 'aac', '-b:a', '192k', micOut)
-  }
-  if (hasWebcam && webcamOut) {
-    finalArgs.push('-map', '0:v', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', webcamOut)
-  }
-  return finalArgs
-}
 
 /**
  * Creates the system tray icon and context menu for controlling an active recording.
@@ -561,14 +539,7 @@ export async function startRecording(options: any) {
 
   // --- Add Microphone and Webcam inputs first ---
   if (process.platform === 'darwin') {
-    // macOS: combine mic + webcam into a single avfoundation input to avoid
-    // dual-session conflicts. Format: "videoIdx:audioIdx"; use "none" for absent device.
-    if (mic || webcam) {
-      const videoIdx = webcam ? `${webcam.index}` : 'none'
-      const audioIdx = mic ? `${mic.index}` : 'none'
-      const frameRateArgs = webcam ? ['-framerate', '30'] : []
-      baseFfmpegArgs.push('-f', 'avfoundation', ...frameRateArgs, '-i', `${videoIdx}:${audioIdx}`)
-    }
+    baseFfmpegArgs.push(...buildMacAvfoundationInput(mic, webcam))
   } else {
     if (mic) {
       switch (process.platform) {
