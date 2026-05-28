@@ -342,6 +342,8 @@ async function startActualRecording(
         'Device not found',
         'Unknown input format',
         'error opening device',
+        'Input/output error',
+        'Permission denied',
       ]
       if (fatalErrorKeywords.some((keyword) => message.toLowerCase().includes(keyword.toLowerCase()))) {
         log.error(`[FFMPEG] Fatal error detected: ${message}`)
@@ -437,27 +439,13 @@ function buildMacFfmpegArgs(
   webcamOut?: string,
 ): string[] {
   const finalArgs = [...inputArgs]
-  const micIndex = hasMic ? 0 : -1
-  const webcamIndex = hasMic ? (hasWebcam ? 1 : -1) : hasWebcam ? 0 : -1
-
+  // Single combined avfoundation input: stream 0:v = webcam, 0:a = mic.
   if (hasMic && micOut) {
-    finalArgs.push('-map', `${micIndex}:a`, '-c:a', 'aac', '-b:a', '192k', micOut)
+    finalArgs.push('-map', '0:a', '-c:a', 'aac', '-b:a', '192k', micOut)
   }
-
   if (hasWebcam && webcamOut) {
-    finalArgs.push(
-      '-map',
-      `${webcamIndex}:v`,
-      '-c:v',
-      'libx264',
-      '-preset',
-      'ultrafast',
-      '-pix_fmt',
-      'yuv420p',
-      webcamOut,
-    )
+    finalArgs.push('-map', '0:v', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', webcamOut)
   }
-
   return finalArgs
 }
 
@@ -572,30 +560,35 @@ export async function startRecording(options: any) {
   let recordingGeometry: RecordingGeometry
 
   // --- Add Microphone and Webcam inputs first ---
-  if (mic) {
-    switch (process.platform) {
-      case 'linux':
-        baseFfmpegArgs.push('-f', 'alsa', '-i', 'default')
-        break
-      case 'win32':
-        baseFfmpegArgs.push('-f', 'dshow', '-i', `audio=${mic.deviceLabel}`)
-        break
-      case 'darwin':
-        baseFfmpegArgs.push('-f', 'avfoundation', '-i', `:${mic.index}`)
-        break
+  if (process.platform === 'darwin') {
+    // macOS: combine mic + webcam into a single avfoundation input to avoid
+    // dual-session conflicts. Format: "videoIdx:audioIdx"; use "none" for absent device.
+    if (mic || webcam) {
+      const videoIdx = webcam ? `${webcam.index}` : 'none'
+      const audioIdx = mic ? `${mic.index}` : 'none'
+      const frameRateArgs = webcam ? ['-framerate', '30'] : []
+      baseFfmpegArgs.push('-f', 'avfoundation', ...frameRateArgs, '-i', `${videoIdx}:${audioIdx}`)
     }
-  }
-  if (webcam) {
-    switch (process.platform) {
-      case 'linux':
-        baseFfmpegArgs.push('-f', 'v4l2', '-i', `/dev/video${webcam.index}`)
-        break
-      case 'win32':
-        baseFfmpegArgs.push('-f', 'dshow', '-i', `video=${webcam.deviceLabel}`)
-        break
-      case 'darwin':
-        baseFfmpegArgs.push('-f', 'avfoundation', '-i', `${webcam.index}:none`)
-        break
+  } else {
+    if (mic) {
+      switch (process.platform) {
+        case 'linux':
+          baseFfmpegArgs.push('-f', 'alsa', '-i', 'default')
+          break
+        case 'win32':
+          baseFfmpegArgs.push('-f', 'dshow', '-i', `audio=${mic.deviceLabel}`)
+          break
+      }
+    }
+    if (webcam) {
+      switch (process.platform) {
+        case 'linux':
+          baseFfmpegArgs.push('-f', 'v4l2', '-i', `/dev/video${webcam.index}`)
+          break
+        case 'win32':
+          baseFfmpegArgs.push('-f', 'dshow', '-i', `video=${webcam.deviceLabel}`)
+          break
+      }
     }
   }
 
