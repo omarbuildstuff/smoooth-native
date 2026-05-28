@@ -25,6 +25,8 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Sources
+      - path: Resources
+        buildPhase: resources
     dependencies:
       - package: SmooothCore
         product: SmooothCore
