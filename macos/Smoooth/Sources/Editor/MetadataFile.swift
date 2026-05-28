@@ -39,11 +39,13 @@ struct RecordingMetadata: Decodable {
             guard c.width > 0, c.height > 0, c.image.count == c.width * c.height * 4 else { continue }
             let bytes = c.image.map { UInt8(clamping: $0) }
             guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { continue }
-            // Capture writes premultiplied RGBA (NSCursor TIFF → premultipliedLast),
-            // so decode with the matching alpha info to avoid edge halos.
+            // Capture writes premultiplied RGBA in big-endian byte order (R,G,B,A
+            // memory bytes); decode with the matching flags to avoid edge halos /
+            // channel swaps.
+            let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
             guard let cg = CGImage(width: c.width, height: c.height, bitsPerComponent: 8, bitsPerPixel: 32,
                                    bytesPerRow: c.width * 4, space: srgb,
-                                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                   bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
                                    provider: provider, decode: nil, shouldInterpolate: true,
                                    intent: .defaultIntent) else { continue }
             out[key] = CursorBitmap(image: cg, width: Double(c.width), height: Double(c.height),
