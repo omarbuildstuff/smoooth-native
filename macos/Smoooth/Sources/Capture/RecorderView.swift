@@ -10,6 +10,7 @@ struct RecorderView: View {
     var onCancel: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var captureSystemAudio = false
     @State private var captureMic = false
@@ -18,6 +19,8 @@ struct RecorderView: View {
     @State private var cameraDeviceID: String?
     @State private var fps = 60
     @State private var errorMessage: String?
+    @State private var recStart: Date?
+    @State private var pulse = false
 
     var body: some View {
         ZStack {
@@ -101,22 +104,45 @@ struct RecorderView: View {
     }
 
     private var recordingControls: some View {
-        VStack(spacing: 18) {
-            HStack(spacing: 8) {
-                Circle().fill(theme.destructive).frame(width: 10, height: 10)
-                Text("Recording…").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.destructive)
+        VStack(spacing: 20) {
+            // Big pulsing record indicator.
+            ZStack {
+                Circle().strokeBorder(theme.destructive.opacity(0.4), lineWidth: 2)
+                    .frame(width: 104, height: 104)
+                    .scaleEffect(pulse && !reduceMotion ? 1.18 : 0.92)
+                    .opacity(pulse && !reduceMotion ? 0 : 0.9)
+                Circle().fill(theme.destructive.opacity(0.14)).frame(width: 84, height: 84)
+                Circle().fill(theme.destructive).frame(width: 28, height: 28)
+                    .shadow(color: theme.destructive.opacity(0.6), radius: 12)
             }
+            .frame(height: 110)
+
+            SwiftUI.TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                Text(elapsedString(ctx.date))
+                    .font(.system(size: 40, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(theme.foreground)
+            }
+            Text("Recording your screen — auto-zoom is tracking your cursor")
+                .font(.system(size: 12)).foregroundStyle(theme.mutedForeground)
+                .multilineTextAlignment(.center)
+
             HStack(spacing: 14) {
                 Button("Cancel") { Task { await coordinator.cancel(); onCancel() } }
-                    .buttonStyle(SoftButtonStyle(theme: theme))
-                Button {
-                    Task { await stopRecording() }
-                } label: {
-                    Label("Stop & Edit", systemImage: "stop.fill")
+                    .buttonStyle(SoftButtonStyle(theme: theme, height: 44))
+                Button { Task { await stopRecording() } } label: {
+                    Label("Stop & Edit", systemImage: "stop.fill").frame(width: 150)
                 }
-                .buttonStyle(PremiumButtonStyle(theme: theme))
+                .buttonStyle(PremiumButtonStyle(theme: theme, height: 44))
             }
+            .font(.system(size: 14, weight: .semibold))
+            .padding(.top, 4)
         }
+        .onAppear { if !reduceMotion { withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) { pulse = true } } }
+    }
+
+    private func elapsedString(_ now: Date) -> String {
+        let s = max(0, Int(now.timeIntervalSince(recStart ?? now)))
+        return String(format: "%02d:%02d", s / 60, s % 60)
     }
 
     private func startRecording() async {
@@ -146,6 +172,7 @@ struct RecorderView: View {
             systemAudio: captureSystemAudio, fps: fps)
         do {
             try await coordinator.start(options: options)
+            recStart = Date()
         } catch {
             errorMessage = error.localizedDescription
         }
