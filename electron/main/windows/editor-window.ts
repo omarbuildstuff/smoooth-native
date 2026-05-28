@@ -114,7 +114,9 @@ export function createEditorWindow(
     appState.editorWin = null
   })
 
-  appState.editorWin.show()
+  appState.editorWin.once('ready-to-show', () => {
+    appState.editorWin?.show()
+  })
 
   const editorUrl = VITE_DEV_SERVER_URL
     ? `${VITE_DEV_SERVER_URL}#editor`
