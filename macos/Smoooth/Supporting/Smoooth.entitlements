@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for a SIGNED + notarized build (hardened runtime).
+  Not used by the default unsigned/ad-hoc build. Enable by adding
+  CODE_SIGN_ENTITLEMENTS + ENABLE_HARDENED_RUNTIME to project.yml (see docs/SIGNING.md).
+  Screen Recording is a TCC permission (Info.plist usage string), not an entitlement.
+  Note: App Sandbox is intentionally OFF — CGEventTap (click capture) is incompatible with it.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.microphone</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>
