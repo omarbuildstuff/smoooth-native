@@ -301,12 +301,24 @@ public final class RecordingCoordinator: ObservableObject {
         let scale = scaleFactor(for: displayID)
         let x = Int((bounds.origin.x * scale).rounded())
         let y = Int((bounds.origin.y * scale).rounded())
-        // CGDisplayPixelsWide/High return the actual backing-store pixel size.
-        let pxW = CGDisplayPixelsWide(displayID)
-        let pxH = CGDisplayPixelsHigh(displayID)
-        let width = evenFloor(Double(pxW))
-        let height = evenFloor(Double(pxH))
+        // True backing-store pixels. NB: CGDisplayPixelsWide returns the scaled
+        // *mode point size* on HiDPI displays (e.g. 1470 on a 2x "looks like 1470"
+        // mode), which mismatches the physical-pixel mouse coordinates and breaks
+        // the geometry filter + cursor scaling. CGDisplayMode.pixelWidth is the real
+        // backing-pixel count (e.g. 2940).
+        let px = displayPixelSize(displayID)
+        let width = evenFloor(Double(px.w))
+        let height = evenFloor(Double(px.h))
         return RecordingGeometry(x: x, y: y, width: width, height: height)
+    }
+
+    /// Real backing-pixel size of a display (not the scaled mode point size).
+    private func displayPixelSize(_ id: CGDirectDisplayID) -> (w: Int, h: Int) {
+        if let mode = CGDisplayCopyDisplayMode(id) {
+            let pw = mode.pixelWidth, ph = mode.pixelHeight
+            if pw > 0 && ph > 0 { return (pw, ph) }
+        }
+        return (CGDisplayPixelsWide(id), CGDisplayPixelsHigh(id))
     }
 
     private func windowGeometry(for source: RecordingSource) async throws -> RecordingGeometry {
@@ -358,8 +370,8 @@ public final class RecordingCoordinator: ObservableObject {
 
     /// Primary-display pixel size (what the original wrote into `screenSize`).
     private func primaryScreenPixelSize() -> SizeI {
-        let id = CGMainDisplayID()
-        return SizeI(width: CGDisplayPixelsWide(id), height: CGDisplayPixelsHigh(id))
+        let px = displayPixelSize(CGMainDisplayID())
+        return SizeI(width: px.w, height: px.h)
     }
 
     private func evenFloor(_ value: Double) -> Int {

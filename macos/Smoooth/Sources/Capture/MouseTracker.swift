@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import AppKit
+import ApplicationServices
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -98,7 +99,13 @@ public final class MouseTracker: @unchecked Sendable {
         lastCursorKey = "arrow"
         lock.unlock()
 
-        if installEventTap() {
+        // A CGEventTap only delivers events when the app is Accessibility-trusted;
+        // when it is NOT trusted, tapCreate can still hand back a live-looking port
+        // that silently delivers nothing (which is why clicks went missing). NSEvent
+        // global monitors, by contrast, capture mouse clicks/moves WITHOUT
+        // Accessibility — so only use the tap when actually trusted, and otherwise
+        // fall back to monitors that work. The 50Hz poll always provides moves.
+        if AXIsProcessTrusted(), installEventTap() {
             usingFallback = false
         } else if installFallbackMonitors() {
             usingFallback = true

@@ -112,6 +112,8 @@ final class EditorModel {
         hasAudioTrack = await source.hasAudio()
 
         initializePresets()
+        // A recording with a webcam track should show the overlay by default.
+        if webcamVideoURL != nil { isWebcamVisible = true }
         _ = generateZoomRegionsFromClicks()
         currentTime = 0
         refreshBackgroundImage()

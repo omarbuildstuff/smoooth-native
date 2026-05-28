@@ -291,7 +291,9 @@ public enum SceneRenderer {
         let idx = ZoomTransform.findLastMetadataIndex(model.metadata, currentTime)
         guard idx > -1 else { return }
         let event = model.metadata[idx]
-        guard currentTime - event.timestamp < 0.1, let key = event.cursorImageKey,
+        // Draw the last-known pointer continuously — during a recording the cursor is
+        // always on screen, so it must not blink out between (possibly sparse) samples.
+        guard let key = event.cursorImageKey,
               let cursor = inputs.cursorBitmaps[key], cursor.width > 0 else { return }
 
         let cursorX = (event.x / recordingGeometry.width) * frameContentWidth

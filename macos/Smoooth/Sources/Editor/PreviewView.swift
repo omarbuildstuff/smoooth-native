@@ -43,6 +43,8 @@ struct PreviewView: NSViewRepresentable {
         private var lastMain: CGImage?
         private var lastWebcam: CGImage?
         private var lastClockWriteback: Double = -1
+        private var renderInFlight = false
+        private let renderQueue = DispatchQueue(label: "com.smoooth.preview.render", qos: .userInteractive)
         private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
         init(model: EditorModel) { self.model = model }
@@ -133,13 +135,23 @@ struct PreviewView: NSViewRepresentable {
                 lastWebcam = cgImage(from: pb)
             }
             guard let main = lastMain else { return }
-
+            // Composite off the main thread so the 60fps timer never blocks the UI
+            // (the heavy CGContext draw was the source of zoom "stutter"). Drop a
+            // frame if the previous render is still running.
+            if renderInFlight { return }
+            renderInFlight = true
+            let sceneModel = model.sceneModel
+            let t = model.currentTime
             let dims = Geometry.exportDimensions(resolution: "720p", aspectRatio: model.aspectRatio)
             let inputs = SceneFrameInputs(mainVideo: main, webcamVideo: lastWebcam,
                                           backgroundImage: model.backgroundImage, cursorBitmaps: model.cursorBitmaps)
-            if let img = SceneRenderer.renderImage(model: model.sceneModel, inputs: inputs,
-                                                   currentTime: model.currentTime, outputSize: dims) {
-                view.layer?.contents = img
+            renderQueue.async { [weak self] in
+                let img = SceneRenderer.renderImage(model: sceneModel, inputs: inputs, currentTime: t, outputSize: dims)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let img { self.view?.layer?.contents = img }
+                    self.renderInFlight = false
+                }
             }
         }
 

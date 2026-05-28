@@ -48,5 +48,5 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.smoooth.app
         PRODUCT_NAME: Smoooth
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         COMBINE_HIDPI_IMAGES: YES
