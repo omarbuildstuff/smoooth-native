@@ -6,11 +6,12 @@ import type {
   VideoDimensions,
   CursorTheme,
   CursorImageBitmap,
+  AspectRatio,
 } from '../../types'
 import type { MetaDataItem, ZoomRegion, CursorFrame } from '../../types'
 import { ZOOM } from '../../lib/constants'
 import { initialFrameState, recalculateCanvasDimensions } from './frameSlice'
-import { prepareCursorBitmaps } from '../../lib/utils'
+import { prepareCursorBitmaps, synthesizeClicksFromMoves } from '../../lib/utils'
 
 export const initialProjectState: ProjectState = {
   videoPath: null,
@@ -41,7 +42,8 @@ function generateAutoZoomRegions(
   recordingGeometry: RecordingGeometry,
   videoDimensions: VideoDimensions,
 ): Record<string, ZoomRegion> {
-  const clicks = metadata.filter((item) => item.type === 'click' && item.pressed)
+  let clicks = metadata.filter((item) => item.type === 'click' && item.pressed)
+  if (clicks.length === 0) clicks = synthesizeClicksFromMoves(metadata)
   if (clicks.length === 0) return {}
 
   const mergedClickGroups: MetaDataItem[][] = []
@@ -169,6 +171,22 @@ async function prepareMacOSCursorBitmaps(theme: CursorTheme, scale: number): Pro
   return bitmapMap
 }
 
+function detectAspectRatio(width: number, height: number): AspectRatio {
+  const ratio = width / height
+  const candidates: [AspectRatio, number][] = [
+    ['16:9', 16 / 9],
+    ['16:10', 16 / 10],
+    ['3:2', 3 / 2],
+    ['4:3', 4 / 3],
+    ['1:1', 1],
+    ['9:16', 9 / 16],
+    ['3:4', 3 / 4],
+  ]
+  return candidates.reduce((best, curr) =>
+    Math.abs(curr[1] - ratio) < Math.abs(best[1] - ratio) ? curr : best
+  )[0]
+}
+
 export const createProjectSlice: Slice<ProjectState, ProjectActions> = (set, get) => ({
   ...initialProjectState,
   loadProject: async ({ videoPath, metadataPath, webcamVideoPath }) => {
@@ -261,6 +279,10 @@ export const createProjectSlice: Slice<ProjectState, ProjectActions> = (set, get
       if (!state.screenSize) {
         state.screenSize = { width: dims.width, height: dims.height }
       }
+      // Auto-detect aspect ratio from video dimensions so canvas matches recording
+      if (dims.width > 0 && dims.height > 0) {
+        state.aspectRatio = detectAspectRatio(dims.width, dims.height)
+      }
       recalculateCanvasDimensions(state)
     }),
   setDuration: (duration) =>
@@ -285,7 +307,7 @@ export const createProjectSlice: Slice<ProjectState, ProjectActions> = (set, get
     })
   },
   reloadCursorTheme: async (themeName: string) => {
-    const { platform } = get()
+    const platform = get().platform || (await window.electronAPI.getPlatform())
     if (platform !== 'win32' && platform !== 'darwin') return
 
     set((state) => {

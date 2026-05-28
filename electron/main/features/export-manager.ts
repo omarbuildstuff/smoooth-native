@@ -60,7 +60,7 @@ export async function startExport(event: IpcMainInvokeEvent, { projectState, exp
     '-',
   ]
   if (format === 'mp4') {
-    ffmpegArgs.push('-c:v', 'libx264', '-preset', 'medium', '-pix_fmt', 'yuv420p')
+    ffmpegArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '15', '-tune', 'animation', '-pix_fmt', 'yuv420p')
   } else {
     ffmpegArgs.push('-vf', 'split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse')
   }

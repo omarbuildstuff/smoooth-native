@@ -1,6 +1,6 @@
 // --- Types ---
 export type BackgroundType = 'color' | 'gradient' | 'image' | 'wallpaper'
-export type AspectRatio = '16:9' | '9:16' | '4:3' | '3:4' | '1:1'
+export type AspectRatio = '16:9' | '16:10' | '3:2' | '9:16' | '4:3' | '3:4' | '1:1'
 export type SidePanelTab = 'general' | 'camera' | 'cursor' | 'audio' | 'animation' | 'settings'
 
 export interface Background {
@@ -229,6 +229,7 @@ export interface TimelineActions {
   setTimelineZoom: (zoom: number) => void
   applyAnimationSettingsToAll: (settings: { transitionDuration: number; easing: string; zoomLevel: number }) => void
   applySpeedToAll: (speed: number) => void
+  generateZoomRegionsFromClicks: () => number
 }
 
 export interface PresetState {

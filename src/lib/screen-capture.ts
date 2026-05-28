@@ -88,6 +88,11 @@ export async function startScreenCapture(opts: StartScreenCaptureOptions): Promi
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: targetSource.id,
+          minWidth: 1920,
+          minHeight: 1080,
+          maxWidth: 7680,
+          maxHeight: 4320,
+          maxFrameRate: 30,
         },
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -145,7 +150,7 @@ export async function startScreenCapture(opts: StartScreenCaptureOptions): Promi
     const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? ''
 
     const recorderOptions: MediaRecorderOptions = {
-      videoBitsPerSecond: opts.videoBitsPerSecond ?? 8_000_000,
+      videoBitsPerSecond: opts.videoBitsPerSecond ?? 30_000_000,
       audioBitsPerSecond: opts.audioBitsPerSecond ?? 128_000,
     }
     if (mimeType) recorderOptions.mimeType = mimeType

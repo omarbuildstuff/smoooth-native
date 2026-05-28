@@ -117,6 +117,8 @@ export function PreviewControls() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="16:9">16:9 Landscape</SelectItem>
+              <SelectItem value="16:10">16:10 MacBook</SelectItem>
+              <SelectItem value="3:2">3:2 MacBook Air</SelectItem>
               <SelectItem value="9:16">9:16 Portrait</SelectItem>
               <SelectItem value="4:3">4:3 Standard</SelectItem>
               <SelectItem value="3:4">3:4 Tall</SelectItem>

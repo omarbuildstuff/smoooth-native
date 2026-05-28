@@ -24,6 +24,7 @@ export function createRecorderWindow() {
     y,
     frame: false,
     transparent: true,
+    hasShadow: false,
     alwaysOnTop: false,
     resizable: false,
     webPreferences: {

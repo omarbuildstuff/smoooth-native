@@ -1,6 +1,7 @@
 import { TIMELINE, ZOOM } from '../../lib/constants'
 import type { TimelineState, TimelineActions, Slice } from '../../types'
 import type { CutRegion, ZoomRegion, SpeedRegion } from '../../types'
+import { synthesizeClicksFromMoves } from '../../lib/utils'
 
 export const initialTimelineState: TimelineState = {
   zoomRegions: {},
@@ -178,5 +179,80 @@ export const createTimelineSlice: Slice<TimelineState, TimelineActions> = (set, 
         region.speed = speed
       })
     })
+  },
+  generateZoomRegionsFromClicks: () => {
+    const { metadata, recordingGeometry, duration } = get()
+    if (duration === 0 || !recordingGeometry) return 0
+
+    // Use all click events; fall back to cursor-pause synthesis on macOS (no CGEventTap)
+    let clicks = metadata
+      .filter((m) => m.type === 'click')
+      .sort((a, b) => a.timestamp - b.timestamp)
+
+    if (clicks.length === 0) {
+      clicks = synthesizeClicksFromMoves(metadata).sort((a, b) => a.timestamp - b.timestamp)
+    }
+
+    if (clicks.length === 0) return 0
+
+    const transitionDuration = ZOOM.SPEED_OPTIONS[ZOOM.DEFAULT_SPEED as keyof typeof ZOOM.SPEED_OPTIONS]
+
+    // Group clicks separated by less than AUTO_ZOOM_MIN_DURATION (matching project load logic)
+    const groups: { first: (typeof clicks)[0]; last: (typeof clicks)[0] }[] = []
+    let groupStart = clicks[0]
+    let groupEnd = clicks[0]
+    for (let i = 1; i < clicks.length; i++) {
+      if (clicks[i].timestamp - groupEnd.timestamp < ZOOM.AUTO_ZOOM_MIN_DURATION) {
+        groupEnd = clicks[i]
+      } else {
+        groups.push({ first: groupStart, last: groupEnd })
+        groupStart = clicks[i]
+        groupEnd = clicks[i]
+      }
+    }
+    groups.push({ first: groupStart, last: groupEnd })
+
+    const newRegions: ZoomRegion[] = []
+
+    for (let i = 0; i < groups.length; i++) {
+      const { first, last } = groups[i]
+      const startTime = Math.max(0, first.timestamp - ZOOM.AUTO_ZOOM_PRE_CLICK_OFFSET)
+      const rawDuration = last.timestamp + ZOOM.AUTO_ZOOM_POST_CLICK_PADDING - startTime
+      const regionDuration = Math.max(
+        ZOOM.AUTO_ZOOM_MIN_DURATION,
+        Math.min(rawDuration, duration - startTime),
+      )
+
+      if (regionDuration < TIMELINE.MINIMUM_REGION_DURATION) continue
+
+      const id = `zoom-auto-${Math.round(first.timestamp * 1000)}`
+      newRegions.push({
+        id,
+        type: 'zoom',
+        startTime,
+        duration: regionDuration,
+        zoomLevel: ZOOM.DEFAULT_LEVEL,
+        easing: ZOOM.DEFAULT_EASING,
+        transitionDuration,
+        targetX: first.x / recordingGeometry.width - 0.5,
+        targetY: first.y / recordingGeometry.height - 0.5,
+        mode: 'auto',
+        zIndex: 0,
+      })
+    }
+
+    if (newRegions.length === 0) return 0
+
+    set((state) => {
+      // Replace all existing zoom regions with freshly generated ones
+      state.zoomRegions = {}
+      for (const region of newRegions) {
+        state.zoomRegions[region.id] = region
+      }
+      state.selectedRegionId = null
+      recalculateZIndices(state)
+    })
+
+    return newRegions.length
   },
 })

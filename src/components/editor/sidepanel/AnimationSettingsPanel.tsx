@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useEditorStore } from '../../../store/editorStore'
-import { Route, Wand, Check } from 'tabler-icons-react'
+import { Route, Wand, Check, Click } from 'tabler-icons-react'
 import { ZOOM, DEFAULTS } from '../../../lib/constants'
 import { EASING_MAP } from '../../../lib/easing'
 import { cn } from '../../../lib/utils'
@@ -20,6 +20,7 @@ export function AnimationSettingsPanel() {
   const [easing, setEasing] = useState(DEFAULTS.ANIMATION.EASING.defaultValue)
   const [zoomLevel, setZoomLevel] = useState(DEFAULTS.ANIMATION.ZOOM_LEVEL.defaultValue)
   const [applyStatus, setApplyStatus] = useState<'idle' | 'applied'>('idle')
+  const [generateStatus, setGenerateStatus] = useState<'idle' | 'generated' | 'none'>('idle')
 
   const handleApplyToAll = () => {
     if (applyStatus !== 'idle') return
@@ -35,6 +36,13 @@ export function AnimationSettingsPanel() {
     setSpeed(DEFAULTS.ANIMATION.SPEED.defaultValue)
     setEasing(DEFAULTS.ANIMATION.EASING.defaultValue)
     setZoomLevel(DEFAULTS.ANIMATION.ZOOM_LEVEL.defaultValue)
+  }
+
+  const handleGenerateFromClicks = () => {
+    if (generateStatus !== 'idle') return
+    const count = useEditorStore.getState().generateZoomRegionsFromClicks()
+    setGenerateStatus(count > 0 ? 'generated' : 'none')
+    setTimeout(() => setGenerateStatus('idle'), 2000)
   }
 
   return (
@@ -114,6 +122,37 @@ export function AnimationSettingsPanel() {
                 value={zoomLevel}
                 onChange={setZoomLevel}
               />
+            </div>
+
+            {/* Generate from clicks */}
+            <div className="space-y-3">
+              <Button
+                onClick={handleGenerateFromClicks}
+                disabled={generateStatus !== 'idle'}
+                variant="outline"
+                className={cn(
+                  'w-full h-11 font-semibold transition-all duration-300',
+                  generateStatus === 'generated' && 'border-green-500 text-green-500',
+                  generateStatus === 'none' && 'border-muted-foreground text-muted-foreground',
+                )}
+              >
+                {generateStatus === 'idle' ? (
+                  <>
+                    <Click className="w-4 h-4 mr-2" />
+                    Regenerate Zooms from Clicks
+                  </>
+                ) : generateStatus === 'generated' ? (
+                  <>
+                    <Check className="w-5 h-5 mr-2" />
+                    Zoom Regions Added!
+                  </>
+                ) : (
+                  <>
+                    <Click className="w-4 h-4 mr-2" />
+                    No Clicks Found
+                  </>
+                )}
+              </Button>
             </div>
 
             {/* Apply Collapse */}

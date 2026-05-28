@@ -1,6 +1,6 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-import { CursorImage, CursorImageBitmap, CutRegion, SpeedRegion } from '../types'
+import { CursorImage, CursorImageBitmap, CutRegion, SpeedRegion, MetaDataItem } from '../types'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -195,4 +195,38 @@ export const mapExportTimeToSourceTime = (
 
   // If exportTime is beyond the calculated duration (e.g., due to floating point), clamp to the end
   return sourceTime
+}
+
+// Synthesize click-like events from cursor-pause patterns in move events.
+// Used on macOS where CGEventTap is unavailable and no real click events are recorded.
+// Timestamps are in milliseconds (raw from the tracker, before /1000 conversion).
+export function synthesizeClicksFromMoves(metadata: MetaDataItem[]): MetaDataItem[] {
+  const PAUSE_RADIUS = 15   // px — cursor must stay within this radius
+  const MIN_PAUSE_MS = 100  // ms — minimum dwell to count as interaction
+  const MAX_PAUSE_MS = 2500 // ms — above this = idle/AFK, not a click
+
+  const moves = metadata
+    .filter((m) => m.type === 'move')
+    .sort((a, b) => a.timestamp - b.timestamp)
+  if (moves.length === 0) return []
+
+  const synthetic: MetaDataItem[] = []
+  let i = 0
+  while (i < moves.length) {
+    const anchor = moves[i]
+    let j = i + 1
+    while (
+      j < moves.length &&
+      Math.abs(moves[j].x - anchor.x) <= PAUSE_RADIUS &&
+      Math.abs(moves[j].y - anchor.y) <= PAUSE_RADIUS
+    ) {
+      j++
+    }
+    const dwellMs = moves[Math.min(j, moves.length) - 1].timestamp - anchor.timestamp
+    if (dwellMs >= MIN_PAUSE_MS && dwellMs <= MAX_PAUSE_MS) {
+      synthetic.push({ ...anchor, type: 'click', pressed: true })
+    }
+    i = j
+  }
+  return synthetic
 }
