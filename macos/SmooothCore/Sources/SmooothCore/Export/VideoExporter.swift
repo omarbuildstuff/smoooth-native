@@ -32,18 +32,23 @@ public final class VideoExporter: @unchecked Sendable {
         public var aspectRatio: AspectRatio
         public var settings: ExportSettings
         public var outputURL: URL
+        /// Editor audio controls applied to the exported audio.
+        public var volume: Double
+        public var muted: Bool
 
         public init(mainVideoURL: URL, webcamVideoURL: URL? = nil, model: SceneModel,
                     backgroundImage: CGImage? = nil, cursorBitmaps: [String: CursorBitmap] = [:],
                     customCursor: CursorBitmap? = nil,
                     duration: Double, cutRegions: [String: CutRegion] = [:],
                     speedRegions: [String: SpeedRegion] = [:], aspectRatio: AspectRatio,
-                    settings: ExportSettings, outputURL: URL) {
+                    settings: ExportSettings, outputURL: URL,
+                    volume: Double = 1, muted: Bool = false) {
             self.mainVideoURL = mainVideoURL; self.webcamVideoURL = webcamVideoURL; self.model = model
             self.backgroundImage = backgroundImage; self.cursorBitmaps = cursorBitmaps
             self.customCursor = customCursor
             self.duration = duration; self.cutRegions = cutRegions; self.speedRegions = speedRegions
             self.aspectRatio = aspectRatio; self.settings = settings; self.outputURL = outputURL
+            self.volume = volume; self.muted = muted
         }
     }
 
@@ -88,11 +93,13 @@ public final class VideoExporter: @unchecked Sendable {
         try await exportMP4(renderFrame: renderFrame, totalFrames: totalFrames, fps: fps,
                             dims: dims, outputURL: tempVideo, progress: progress)
 
-        if await mainSource.hasAudio() {
+        let sourceHasAudio = await mainSource.hasAudio()
+        let wantAudio = !job.muted && job.volume > 0.001 && sourceHasAudio
+        if wantAudio {
             do {
                 try await muxAudio(videoOnly: tempVideo, sourceVideo: job.mainVideoURL,
                                    duration: job.duration, cutRegions: job.cutRegions,
-                                   speedRegions: job.speedRegions, output: job.outputURL)
+                                   speedRegions: job.speedRegions, volume: job.volume, output: job.outputURL)
                 try? FileManager.default.removeItem(at: tempVideo)
             } catch {
                 // Audio mux failed — keep the (valid) video-only output.
@@ -110,7 +117,7 @@ public final class VideoExporter: @unchecked Sendable {
 
     private func muxAudio(videoOnly: URL, sourceVideo: URL, duration: Double,
                           cutRegions: [String: CutRegion], speedRegions: [String: SpeedRegion],
-                          output: URL) async throws {
+                          volume: Double, output: URL) async throws {
         let comp = AVMutableComposition()
         let videoAsset = AVURLAsset(url: videoOnly)
         guard let vTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
@@ -122,14 +129,18 @@ public final class VideoExporter: @unchecked Sendable {
 
         let srcAsset = AVURLAsset(url: sourceVideo)
         let hasSpeed = !speedRegions.isEmpty
-        if let aTrack = try await srcAsset.loadTracks(withMediaType: .audio).first,
-           let compA = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            // Same segment walk as TimeRemap: drop cuts, scale speed regions.
-            let cuts = Array(cutRegions.values), speeds = Array(speedRegions.values)
-            var events = Set<Double>([0, duration])
-            for r in cuts { events.insert(r.startTime); events.insert(r.startTime + r.duration) }
-            for r in speeds { events.insert(r.startTime); events.insert(r.startTime + r.duration) }
-            let sorted = events.sorted().filter { $0 >= 0 && $0 <= duration }
+        let cuts = Array(cutRegions.values), speeds = Array(speedRegions.values)
+        var events = Set<Double>([0, duration])
+        for r in cuts { events.insert(r.startTime); events.insert(r.startTime + r.duration) }
+        for r in speeds { events.insert(r.startTime); events.insert(r.startTime + r.duration) }
+        let sorted = events.sorted().filter { $0 >= 0 && $0 <= duration }
+
+        // Mux EVERY source audio track (system audio + microphone) so neither is
+        // dropped — a recording commonly has both as separate tracks.
+        var mixParams: [AVMutableAudioMixInputParameters] = []
+        let audioTracks = try await srcAsset.loadTracks(withMediaType: .audio)
+        for aTrack in audioTracks {
+            guard let compA = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
             var cursor = CMTime.zero
             for i in 0..<max(0, sorted.count - 1) {
                 let segStart = sorted[i], segEnd = sorted[i + 1]
@@ -138,7 +149,7 @@ public final class VideoExporter: @unchecked Sendable {
                 let speed = speeds.first(where: { mid >= $0.startTime && mid < $0.startTime + $0.duration })?.speed ?? 1
                 let range = CMTimeRange(start: CMTime(seconds: segStart, preferredTimescale: 600),
                                         duration: CMTime(seconds: segEnd - segStart, preferredTimescale: 600))
-                try compA.insertTimeRange(range, of: aTrack, at: cursor)
+                do { try compA.insertTimeRange(range, of: aTrack, at: cursor) } catch { continue }
                 if speed != 1 {
                     let scaledDur = CMTime(seconds: (segEnd - segStart) / speed, preferredTimescale: 600)
                     compA.scaleTimeRange(CMTimeRange(start: cursor, duration: range.duration), toDuration: scaledDur)
@@ -147,11 +158,29 @@ public final class VideoExporter: @unchecked Sendable {
                     cursor = cursor + range.duration
                 }
             }
+            if volume != 1 {
+                let p = AVMutableAudioMixInputParameters(track: compA)
+                p.setVolume(Float(max(0, min(1, volume))), at: .zero)
+                mixParams.append(p)
+            }
         }
 
         let preset = hasSpeed ? AVAssetExportPresetHighestQuality : AVAssetExportPresetPassthrough
         guard let session = AVAssetExportSession(asset: comp, presetName: preset) else {
             throw ExportError.writeFailed("audio mux: export session")
+        }
+        // Passthrough can't apply a volume mix; switch preset if volume is reduced.
+        if !mixParams.isEmpty {
+            let mix = AVMutableAudioMix(); mix.inputParameters = mixParams
+            session.audioMix = mix
+            if preset == AVAssetExportPresetPassthrough,
+               let s2 = AVAssetExportSession(asset: comp, presetName: AVAssetExportPresetHighestQuality) {
+                s2.audioMix = mix; s2.outputURL = output; s2.outputFileType = .mp4
+                try? FileManager.default.removeItem(at: output)
+                await s2.export()
+                if s2.status != .completed { throw ExportError.writeFailed("audio mux: \(s2.error?.localizedDescription ?? "failed")") }
+                return
+            }
         }
         try? FileManager.default.removeItem(at: output)
         session.outputURL = output

@@ -178,7 +178,8 @@ struct ExportView: View {
             backgroundImage: model.backgroundImage, cursorBitmaps: model.cursorBitmaps,
             customCursor: model.customCursor,
             duration: model.duration, cutRegions: model.cutRegions, speedRegions: model.speedRegions,
-            aspectRatio: model.aspectRatio, settings: settings, outputURL: outputURL)
+            aspectRatio: model.aspectRatio, settings: settings, outputURL: outputURL,
+            volume: model.volume, muted: model.isMuted)
 
         isExporting = true
         progress = 0
