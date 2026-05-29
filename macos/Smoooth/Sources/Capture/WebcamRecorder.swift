@@ -13,9 +13,25 @@ public final class WebcamRecorder: NSObject, @unchecked Sendable {
 
     private let session = AVCaptureSession()
     private let movieOutput = AVCaptureMovieFileOutput()
+    /// A parallel data output used solely to learn the wall-clock time of the
+    /// first delivered frame. The camera takes ~1–2.5s to warm up, so the webcam
+    /// file's time-0 lands that far into the screen/mic timeline; the coordinator
+    /// turns this into a `webcamOffset` so the editor can re-align the two files.
+    private let dataOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "com.smoooth.webcam.session")
+    private let dataQueue = DispatchQueue(label: "com.smoooth.webcam.data")
     private var outputURL: URL?
     private var finishContinuation: CheckedContinuation<URL, Error>?
+
+    private let stateLock = NSLock()
+    private var _firstFrameWallClock: Double?
+
+    /// Wall-clock seconds (since 1970) of the first webcam frame, or nil if none
+    /// arrived. Compared against the screen recorder's anchor wall clock to
+    /// compute the webcam→screen timeline offset.
+    public var firstFrameWallClock: Double? {
+        stateLock.lock(); defer { stateLock.unlock() }; return _firstFrameWallClock
+    }
 
     public override init() {
         super.init()
@@ -149,10 +165,34 @@ public final class WebcamRecorder: NSObject, @unchecked Sendable {
         }
         session.addOutput(movieOutput)
 
+        // Parallel data output for first-frame timing (non-fatal if unavailable).
+        if session.canAddOutput(dataOutput) {
+            dataOutput.alwaysDiscardsLateVideoFrames = true
+            dataOutput.setSampleBufferDelegate(self, queue: dataQueue)
+            session.addOutput(dataOutput)
+        }
+
         // AVCaptureMovieFileOutput defaults to H.264 in a QuickTime container on
         // macOS, which the editor reads fine. Explicit per-connection codec
         // selection differs across SDKs (the no-arg `availableVideoCodecTypes`
         // is unavailable on macOS), so we rely on the default here.
+    }
+}
+
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+
+extension WebcamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
+    public func captureOutput(_ output: AVCaptureOutput,
+                              didOutput sampleBuffer: CMSampleBuffer,
+                              from connection: AVCaptureConnection) {
+        // Stamp the first frame that lands after the movie file output is actually
+        // recording, so it matches the webcam file's time-0.
+        guard movieOutput.isRecording else { return }
+        stateLock.lock()
+        if _firstFrameWallClock == nil {
+            _firstFrameWallClock = Date().timeIntervalSince1970
+        }
+        stateLock.unlock()
     }
 }
 

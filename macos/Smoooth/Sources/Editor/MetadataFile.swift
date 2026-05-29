@@ -20,6 +20,8 @@ struct RecordingMetadata: Decodable {
     let geometry: Geo?
     let screenSize: Geo?
     let syncOffset: Double?
+    /// Seconds the webcam started after the screen/mic timeline (camera warmup).
+    let webcamOffset: Double?
     let cursorImages: [String: CursorImageData]?
     let events: [MetaDataItem]
 

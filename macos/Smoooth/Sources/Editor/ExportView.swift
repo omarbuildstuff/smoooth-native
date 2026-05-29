@@ -179,7 +179,8 @@ struct ExportView: View {
             customCursor: model.customCursor,
             duration: model.duration, cutRegions: model.cutRegions, speedRegions: model.speedRegions,
             aspectRatio: model.aspectRatio, settings: settings, outputURL: outputURL,
-            volume: model.volume, muted: model.isMuted)
+            volume: model.volume, muted: model.isMuted, webcamOffset: model.webcamOffset,
+            audioOffset: model.audioOffset)
 
         isExporting = true
         progress = 0

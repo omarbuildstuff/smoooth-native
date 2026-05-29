@@ -170,6 +170,15 @@ public final class RecordingCoordinator: ObservableObject {
             webcamURL = try? await webcam.stop()
         }
 
+        // Webcam timeline offset: the camera warms up later than the screen/mic
+        // stream, so the webcam file's time-0 lands `webcamOffset` seconds into the
+        // screen/mic timeline. The editor delays the webcam by this to re-sync.
+        let webcamOffset: Double = {
+            guard let screenWall = recorder.firstFrameWallClock,
+                  let webcamWall = webcamRecorder?.firstFrameWallClock else { return 0 }
+            return max(0, webcamWall - screenWall)
+        }()
+
         // Build + write metadata, rebasing timestamps to the first video frame.
         let drained = tracker?.drain() ?? (samples: [], cursors: [:])
         let metadata = RecordingMetadataWriter.build(
@@ -177,7 +186,8 @@ public final class RecordingCoordinator: ObservableObject {
             cursors: drained.cursors,
             geometry: geometry,
             screenSize: primaryScreenPixelSize(),
-            videoStartWallClock: recorder.firstFrameWallClock
+            videoStartWallClock: recorder.firstFrameWallClock,
+            webcamOffset: webcamOffset
         )
         do {
             try metadata.write(to: metadataURL)
@@ -189,6 +199,7 @@ public final class RecordingCoordinator: ObservableObject {
                 screenSize: primaryScreenPixelSize(),
                 geometry: geometry,
                 syncOffset: 0,
+                webcamOffset: webcamOffset,
                 cursorImages: [:],
                 events: []
             )

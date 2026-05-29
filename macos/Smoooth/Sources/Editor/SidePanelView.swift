@@ -330,6 +330,29 @@ private struct AudioPanel: View {
                     .font(.system(size: 11)).foregroundStyle(theme.mutedForeground)
             }
         }
+
+        if model.webcamVideoURL != nil || model.hasAudioTrack {
+            PanelSection(title: "Sync", icon: "arrow.left.arrow.right") {
+                if model.webcamVideoURL != nil {
+                    LabeledSlider(title: "Webcam vs Audio (s)", value: $model.webcamOffset,
+                                  range: -2...2, step: 0.01, decimals: 2)
+                    HStack(spacing: 8) {
+                        Button("Auto") { Task { await model.recomputeWebcamOffset() } }
+                            .buttonStyle(SoftButtonStyle(theme: theme, height: 26))
+                        Button("Reset") { model.webcamOffset = 0 }
+                            .buttonStyle(SoftButtonStyle(theme: theme, height: 26))
+                    }
+                }
+                if model.hasAudioTrack {
+                    LabeledSlider(title: "Audio vs Screen (s)", value: $model.audioOffset,
+                                  range: -1...1, step: 0.01, decimals: 2)
+                    Button("Reset") { model.audioOffset = 0 }
+                        .buttonStyle(SoftButtonStyle(theme: theme, height: 26))
+                }
+                Text("+ = later, − = earlier. Auto re-detects the camera-warmup offset.")
+                    .font(.system(size: 11)).foregroundStyle(theme.mutedForeground)
+            }
+        }
     }
 }
 

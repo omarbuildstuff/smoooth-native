@@ -35,6 +35,12 @@ public final class VideoExporter: @unchecked Sendable {
         /// Editor audio controls applied to the exported audio.
         public var volume: Double
         public var muted: Bool
+        /// Seconds to delay the webcam relative to the screen/mic timeline (camera
+        /// warmup); the webcam file starts this far into the recording.
+        public var webcamOffset: Double
+        /// Seconds to delay the audio relative to the screen video (+ = later,
+        /// − = earlier). Manual A/V re-sync; usually 0.
+        public var audioOffset: Double
 
         public init(mainVideoURL: URL, webcamVideoURL: URL? = nil, model: SceneModel,
                     backgroundImage: CGImage? = nil, cursorBitmaps: [String: CursorBitmap] = [:],
@@ -42,13 +48,15 @@ public final class VideoExporter: @unchecked Sendable {
                     duration: Double, cutRegions: [String: CutRegion] = [:],
                     speedRegions: [String: SpeedRegion] = [:], aspectRatio: AspectRatio,
                     settings: ExportSettings, outputURL: URL,
-                    volume: Double = 1, muted: Bool = false) {
+                    volume: Double = 1, muted: Bool = false, webcamOffset: Double = 0,
+                    audioOffset: Double = 0) {
             self.mainVideoURL = mainVideoURL; self.webcamVideoURL = webcamVideoURL; self.model = model
             self.backgroundImage = backgroundImage; self.cursorBitmaps = cursorBitmaps
             self.customCursor = customCursor
             self.duration = duration; self.cutRegions = cutRegions; self.speedRegions = speedRegions
             self.aspectRatio = aspectRatio; self.settings = settings; self.outputURL = outputURL
-            self.volume = volume; self.muted = muted
+            self.volume = volume; self.muted = muted; self.webcamOffset = webcamOffset
+            self.audioOffset = audioOffset
         }
     }
 
@@ -70,7 +78,9 @@ public final class VideoExporter: @unchecked Sendable {
                                                                  cutRegions: job.cutRegions, speedRegions: job.speedRegions)
             guard let main = await mainSource.image(at: sourceTime) ?? lastImage else { return nil }
             lastImage = main
-            let webcam = webcamSource != nil ? await webcamSource!.image(at: sourceTime) : nil
+            // Webcam is delayed by its warmup offset; before that it has no footage.
+            let webcamTime = sourceTime - job.webcamOffset
+            let webcam = (webcamSource != nil && webcamTime >= 0) ? await webcamSource!.image(at: webcamTime) : nil
             let inputs = SceneFrameInputs(mainVideo: main, webcamVideo: webcam,
                                           backgroundImage: job.backgroundImage, cursorBitmaps: job.cursorBitmaps,
                                           customCursor: job.customCursor)
@@ -99,7 +109,8 @@ public final class VideoExporter: @unchecked Sendable {
             do {
                 try await muxAudio(videoOnly: tempVideo, sourceVideo: job.mainVideoURL,
                                    duration: job.duration, cutRegions: job.cutRegions,
-                                   speedRegions: job.speedRegions, volume: job.volume, output: job.outputURL)
+                                   speedRegions: job.speedRegions, volume: job.volume,
+                                   audioOffset: job.audioOffset, output: job.outputURL)
                 try? FileManager.default.removeItem(at: tempVideo)
             } catch {
                 // Audio mux failed — keep the (valid) video-only output.
@@ -117,7 +128,7 @@ public final class VideoExporter: @unchecked Sendable {
 
     private func muxAudio(videoOnly: URL, sourceVideo: URL, duration: Double,
                           cutRegions: [String: CutRegion], speedRegions: [String: SpeedRegion],
-                          volume: Double, output: URL) async throws {
+                          volume: Double, audioOffset: Double, output: URL) async throws {
         let comp = AVMutableComposition()
         let videoAsset = AVURLAsset(url: videoOnly)
         guard let vTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
@@ -157,6 +168,16 @@ public final class VideoExporter: @unchecked Sendable {
                 } else {
                     cursor = cursor + range.duration
                 }
+            }
+            // Manual A/V re-sync: shift this audio track by audioOffset (+ later via
+            // leading silence, − earlier by trimming the head).
+            if audioOffset > 0 {
+                compA.insertEmptyTimeRange(CMTimeRange(start: .zero,
+                    duration: CMTime(seconds: audioOffset, preferredTimescale: 600)))
+            } else if audioOffset < 0 {
+                let want = CMTime(seconds: -audioOffset, preferredTimescale: 600)
+                let rem = CMTimeMinimum(want, compA.timeRange.duration)
+                if rem > .zero { compA.removeTimeRange(CMTimeRange(start: .zero, duration: rem)) }
             }
             if volume != 1 {
                 let p = AVMutableAudioMixInputParameters(track: compA)

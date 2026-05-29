@@ -16,6 +16,14 @@ final class EditorModel {
     // Project
     var videoURL: URL?
     var webcamVideoURL: URL?
+    /// Seconds to delay the webcam relative to the screen/mic timeline. The camera
+    /// warms up later than screen capture, so its file starts this far in; preview
+    /// and export shift the webcam by this to keep the face synced to the voice.
+    /// Auto-detected on load (capture metadata or duration gap), manually tunable.
+    var webcamOffset: Double = 0
+    /// Seconds to delay the audio relative to the screen video (+ = later, − =
+    /// earlier). Manual only; 0 by default since capture aligns mic to screen.
+    var audioOffset: Double = 0
     var metadataURL: URL?
     var videoDimensions = SizeD(width: 1920, height: 1080)
     var recordingGeometry: RectD?
@@ -119,6 +127,9 @@ final class EditorModel {
             recordingGeometry = RectD(x: 0, y: 0, width: videoDimensions.width, height: videoDimensions.height)
         }
         if let dur = try? await source.duration() { duration = dur }
+
+        await recomputeWebcamOffset()
+        audioOffset = 0
         sourceFPS = await source.nominalFrameRate()
         hasAudioTrack = await source.hasAudio()
 
@@ -332,6 +343,27 @@ final class EditorModel {
     }
 
     // MARK: - Webcam
+
+    /// Auto-detects the webcam→screen timeline offset (camera warmup). Prefers the
+    /// capture-measured value in metadata; for older recordings without it, falls
+    /// back to the duration gap (both files stop together, so the webcam is shorter
+    /// by its warmup head start). Used on load and by the "Auto" sync button.
+    func recomputeWebcamOffset() async {
+        guard webcamVideoURL != nil else { webcamOffset = 0; return }
+        var metaOffset: Double? = nil
+        if let murl = metadataURL, let meta = try? RecordingMetadata.load(murl) {
+            metaOffset = meta.webcamOffset
+        }
+        if let off = metaOffset, off > 0 {
+            webcamOffset = off
+        } else if let wurl = webcamVideoURL,
+                  let wDur = try? await FrameSource(url: wurl).duration(),
+                  wDur > 0, duration > wDur {
+            webcamOffset = duration - wDur
+        } else {
+            webcamOffset = 0
+        }
+    }
 
     func setWebcamVisibility(_ v: Bool) { performEdit("Webcam") { isWebcamVisible = v } }
     func setWebcamPosition(_ p: WebcamPos) { performEdit("Webcam Position") { webcamPosition = p } }
