@@ -124,9 +124,10 @@ struct LayerPreview: NSViewRepresentable {
             let ar = comps.w / comps.h
             var outW = viewWpx, outH = viewWpx / ar
             if outH > viewHpx { outH = viewHpx; outW = viewHpx * ar }
-            // Cap modestly so the CPU composite keeps pace with the audio clock
-            // (large sizes lagged the video behind the audio). Preview only.
-            let cap = 960.0
+            // Cap so the CPU composite stays well under the frame interval — a slow
+            // composite makes the displayed video lag the real-time audio clock.
+            // Preview only; export renders at full resolution.
+            let cap = 720.0
             if outW > cap { outH *= cap / outW; outW = cap }
             let dims = SizeI(width: max(2, Int(outW.rounded())), height: max(2, Int(outH.rounded())))
 
