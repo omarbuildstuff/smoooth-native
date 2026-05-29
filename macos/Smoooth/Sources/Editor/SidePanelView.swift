@@ -293,6 +293,14 @@ private struct CursorPanel: View {
     var body: some View {
         PanelSection(title: "Cursor", icon: "cursorarrow") {
             PanelToggle(title: "Show cursor", isOn: $model.cursorStyles.showCursor)
+            PanelRow(title: "Theme") {
+                Picker("", selection: $model.cursorStyles.theme) {
+                    ForEach(CursorTheme.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.labelsHidden().frame(width: 130)
+            }
+            if model.cursorStyles.theme != .system {
+                LabeledSlider(title: "Cursor Size", value: $model.cursorStyles.size, range: 14...64)
+            }
             LabeledSlider(title: "Shadow Blur", value: $model.cursorStyles.shadowBlur, range: 0...20)
         }
         PanelSection(title: "Click Ripple", icon: "circle.circle") {

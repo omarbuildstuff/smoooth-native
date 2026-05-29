@@ -48,7 +48,8 @@ enum EditorDefaults {
             clickScaleEffect: Defaults.Cursor.clickScaleEnabled,
             clickScaleAmount: Defaults.Cursor.clickScaleAmount.defaultValue,
             clickScaleDuration: Defaults.Cursor.clickScaleDuration.defaultValue,
-            clickScaleEasing: Defaults.Cursor.clickScaleEasing)
+            clickScaleEasing: Defaults.Cursor.clickScaleEasing,
+            theme: .system, size: 28)
     }
 
     static func defaultWebcamStyles() -> WebcamStyles {

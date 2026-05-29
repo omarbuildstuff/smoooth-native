@@ -291,20 +291,18 @@ public enum SceneRenderer {
         let idx = ZoomTransform.findLastMetadataIndex(model.metadata, currentTime)
         guard idx > -1 else { return }
         let event = model.metadata[idx]
-        // Draw the last-known pointer continuously — during a recording the cursor is
-        // always on screen, so it must not blink out between (possibly sparse) samples.
-        guard let key = event.cursorImageKey,
-              let cursor = inputs.cursorBitmaps[key], cursor.width > 0 else { return }
+        let cs = model.cursorStyles
 
+        // Pointer position in frame-content space.
         let cursorX = (event.x / recordingGeometry.width) * frameContentWidth
         let cursorY = (event.y / recordingGeometry.height) * frameContentHeight
-        let drawX = (cursorX - cursor.xhot).rounded()
-        let drawY = (cursorY - cursor.yhot).rounded()
 
-        ctx.saveGState()
+        // System theme needs a captured bitmap; synthetic themes don't.
+        let bitmap: CursorBitmap? = event.cursorImageKey.flatMap { inputs.cursorBitmaps[$0] }
+        if cs.theme == .system && (bitmap == nil || bitmap!.width <= 0) { return }
 
+        // Click-scale (shared by all themes).
         var cursorScale = 1.0
-        let cs = model.cursorStyles
         if cs.clickScaleEffect {
             let recentClick = model.metadata.last {
                 $0.type == .click && ($0.pressed ?? false)
@@ -317,21 +315,67 @@ public enum SceneRenderer {
             }
         }
 
+        ctx.saveGState()
         if cs.shadowBlur > 0 || cs.shadowOffsetX != 0 || cs.shadowOffsetY != 0 {
             ctx.setShadow(offset: CGSize(width: cs.shadowOffsetX, height: -cs.shadowOffsetY),
                           blur: cs.shadowBlur, color: ColorParse.cgColor(cs.shadowColor))
         }
-
+        // Scale around the pointer location.
         if cursorScale != 1 {
-            let cx = drawX + cursor.xhot
-            let cy = drawY + cursor.yhot
-            ctx.translateBy(x: cx, y: cy)
+            ctx.translateBy(x: cursorX, y: cursorY)
             ctx.scaleBy(x: cursorScale, y: cursorScale)
-            ctx.translateBy(x: -cx, y: -cy)
+            ctx.translateBy(x: -cursorX, y: -cursorY)
         }
 
-        drawImageTopLeft(ctx, cursor.image, in: CGRect(x: drawX, y: drawY, width: cursor.width, height: cursor.height))
+        switch cs.theme {
+        case .system:
+            let cursor = bitmap!
+            let drawX = (cursorX - cursor.xhot).rounded()
+            let drawY = (cursorY - cursor.yhot).rounded()
+            drawImageTopLeft(ctx, cursor.image, in: CGRect(x: drawX, y: drawY, width: cursor.width, height: cursor.height))
+        case .classic, .dot, .highlight:
+            drawSyntheticCursor(ctx, theme: cs.theme, x: cursorX, y: cursorY, size: cs.size)
+        }
         ctx.restoreGState()
+    }
+
+    /// Draws a synthetic pointer (no captured bitmap needed). All shapes have the tip /
+    /// center at (x, y) so they land on the real pointer location.
+    static func drawSyntheticCursor(_ ctx: CGContext, theme: CursorTheme, x: Double, y: Double, size: Double) {
+        let white = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+        let black = CGColor(srgbRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
+        switch theme {
+        case .classic:
+            // Standard arrow with tip at (x,y), drawn downward-right. Path in a y-down space.
+            let s = size / 24.0
+            let pts: [(Double, Double)] = [(0,0),(0,24),(6,18),(10,27),(14,25),(10,16),(18,16)]
+            let path = CGMutablePath()
+            ctx.saveGState()
+            ctx.translateBy(x: x, y: y)
+            ctx.scaleBy(x: s, y: -s)   // flip y so the arrow points down in screen space
+            path.move(to: CGPoint(x: pts[0].0, y: pts[0].1))
+            for p in pts.dropFirst() { path.addLine(to: CGPoint(x: p.0, y: p.1)) }
+            path.closeSubpath()
+            ctx.addPath(path); ctx.setFillColor(black); ctx.fillPath()
+            ctx.addPath(path); ctx.setStrokeColor(white); ctx.setLineWidth(2); ctx.setLineJoin(.round); ctx.strokePath()
+            ctx.restoreGState()
+        case .dot:
+            let r = size * 0.42
+            ctx.setFillColor(white)
+            ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+            ctx.setStrokeColor(black); ctx.setLineWidth(max(1.5, size * 0.06))
+            ctx.strokeEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+        case .highlight:
+            // Loom-style soft amber spotlight + a small solid core.
+            let R = size * 1.1
+            ctx.setFillColor(CGColor(srgbRed: 1.0, green: 0.80, blue: 0.18, alpha: 0.35))
+            ctx.fillEllipse(in: CGRect(x: x - R, y: y - R, width: R * 2, height: R * 2))
+            let r = size * 0.22
+            ctx.setFillColor(CGColor(srgbRed: 1.0, green: 0.78, blue: 0.10, alpha: 0.95))
+            ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+        case .system:
+            break
+        }
     }
 
     // MARK: - Webcam

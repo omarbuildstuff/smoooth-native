@@ -181,6 +181,15 @@ public struct FrameStyles: Codable, Equatable, Sendable {
     }
 }
 
+/// How the pointer is rendered. `.system` draws the real captured cursor bitmap;
+/// the others are synthetic and work on any recording (even with no captured image).
+public enum CursorTheme: String, Codable, Sendable, CaseIterable {
+    case system = "System"
+    case classic = "Classic"
+    case dot = "Dot"
+    case highlight = "Highlight"
+}
+
 public struct CursorStyles: Codable, Equatable, Sendable {
     public var showCursor: Bool
     public var shadowBlur: Double
@@ -195,17 +204,49 @@ public struct CursorStyles: Codable, Equatable, Sendable {
     public var clickScaleAmount: Double
     public var clickScaleDuration: Double
     public var clickScaleEasing: String
+    public var theme: CursorTheme
+    /// Render size for synthetic themes (points in recording space). Ignored by `.system`.
+    public var size: Double
 
     public init(showCursor: Bool, shadowBlur: Double, shadowOffsetX: Double, shadowOffsetY: Double,
                 shadowColor: String, clickRippleEffect: Bool, clickRippleColor: String,
                 clickRippleSize: Double, clickRippleDuration: Double, clickScaleEffect: Bool,
-                clickScaleAmount: Double, clickScaleDuration: Double, clickScaleEasing: String) {
+                clickScaleAmount: Double, clickScaleDuration: Double, clickScaleEasing: String,
+                theme: CursorTheme = .system, size: Double = 28) {
         self.showCursor = showCursor; self.shadowBlur = shadowBlur; self.shadowOffsetX = shadowOffsetX
         self.shadowOffsetY = shadowOffsetY; self.shadowColor = shadowColor
         self.clickRippleEffect = clickRippleEffect; self.clickRippleColor = clickRippleColor
         self.clickRippleSize = clickRippleSize; self.clickRippleDuration = clickRippleDuration
         self.clickScaleEffect = clickScaleEffect; self.clickScaleAmount = clickScaleAmount
         self.clickScaleDuration = clickScaleDuration; self.clickScaleEasing = clickScaleEasing
+        self.theme = theme; self.size = size
+    }
+
+    // Tolerant decode: older recordings/presets have no `theme`/`size`.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        showCursor = try c.decode(Bool.self, forKey: .showCursor)
+        shadowBlur = try c.decode(Double.self, forKey: .shadowBlur)
+        shadowOffsetX = try c.decode(Double.self, forKey: .shadowOffsetX)
+        shadowOffsetY = try c.decode(Double.self, forKey: .shadowOffsetY)
+        shadowColor = try c.decode(String.self, forKey: .shadowColor)
+        clickRippleEffect = try c.decode(Bool.self, forKey: .clickRippleEffect)
+        clickRippleColor = try c.decode(String.self, forKey: .clickRippleColor)
+        clickRippleSize = try c.decode(Double.self, forKey: .clickRippleSize)
+        clickRippleDuration = try c.decode(Double.self, forKey: .clickRippleDuration)
+        clickScaleEffect = try c.decode(Bool.self, forKey: .clickScaleEffect)
+        clickScaleAmount = try c.decode(Double.self, forKey: .clickScaleAmount)
+        clickScaleDuration = try c.decode(Double.self, forKey: .clickScaleDuration)
+        clickScaleEasing = try c.decode(String.self, forKey: .clickScaleEasing)
+        theme = try c.decodeIfPresent(CursorTheme.self, forKey: .theme) ?? .system
+        size = try c.decodeIfPresent(Double.self, forKey: .size) ?? 28
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case showCursor, shadowBlur, shadowOffsetX, shadowOffsetY, shadowColor
+        case clickRippleEffect, clickRippleColor, clickRippleSize, clickRippleDuration
+        case clickScaleEffect, clickScaleAmount, clickScaleDuration, clickScaleEasing
+        case theme, size
     }
 }
 
