@@ -26,13 +26,14 @@ final class EditorModel {
     var cursorBitmaps: [String: CursorBitmap] = [:]
     var hasAudioTrack = false
 
-    /// Bundled image cursor (Bayzo), loaded once. Hotspot ≈ the arrow tip.
+    /// Bundled image cursor (Bayzo), loaded once. Hotspot = the arrow tip (the
+    /// right-pointing vertex of the edited artwork).
     @ObservationIgnored lazy var customCursor: CursorBitmap? = Self.loadBayzoCursor()
     private static func loadBayzoCursor() -> CursorBitmap? {
         guard let url = Bundle.main.url(forResource: "BayzoCursor", withExtension: "png"),
               let cg = ImageLoader.load(url) else { return nil }
         let w = Double(cg.width), h = Double(cg.height)
-        return CursorBitmap(image: cg, width: w, height: h, xhot: w * 0.34, yhot: h * 0.13)
+        return CursorBitmap(image: cg, width: w, height: h, xhot: w * 0.853, yhot: h * 0.506)
     }
 
     // Playback
