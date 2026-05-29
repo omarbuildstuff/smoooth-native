@@ -14,7 +14,7 @@ struct SmooothApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { ContentView() }.windowResizability(.contentSize)
+        WindowGroup { ContentView() }   // window sizing handled per-screen in ContentView
     }
 
     @MainActor

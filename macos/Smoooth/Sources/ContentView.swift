@@ -14,23 +14,55 @@ struct ContentView: View {
 
     private var theme: Theme { Theme(model.mode) }
 
+    @State private var recorderSize: CGSize = CGSize(width: 520, height: 560)
+
     var body: some View {
         Group {
             switch screen {
             case .home:
                 HomeView(onImport: importVideo, onRecord: { screen = .recorder })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 1000, minHeight: 700)
             case .recorder:
+                // Sized to the card — the window shrinks to fit (no black margin).
                 RecorderView(coordinator: recorder,
                              onStart: { options in startRecording(options) },
-                             onBack: { screen = .home })
+                             onBack: { screen = .home },
+                             onSize: { size in
+                                 recorderSize = size
+                                 if screen == .recorder { applyWindowSize(size, resizable: false) }
+                             })
             case .editor:
                 EditorView(model: model)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 1100, minHeight: 740)
             }
         }
-        .frame(minWidth: 1100, minHeight: 740)
         .environment(\.theme, theme)
         .preferredColorScheme(model.mode == "dark" ? .dark : .light)
         .background(WindowAccessor { if let w = $0 { mainWindow = w } })
+        .onChange(of: screen) { _, new in applyWindowSizing(for: new) }
+    }
+
+    private func applyWindowSizing(for screen: Screen) {
+        switch screen {
+        case .recorder: applyWindowSize(recorderSize, resizable: false)
+        case .home: applyWindowSize(CGSize(width: 1100, height: 760), resizable: true)
+        case .editor: applyWindowSize(CGSize(width: 1280, height: 820), resizable: true)
+        }
+    }
+
+    private func applyWindowSize(_ size: CGSize, resizable: Bool) {
+        guard let w = mainWindow else { return }
+        if resizable { w.styleMask.insert(.resizable) } else { w.styleMask.remove(.resizable) }
+        w.contentMinSize = size
+        w.contentMaxSize = resizable ? NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude) : size
+        let frame = w.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        var newFrame = w.frame
+        newFrame.origin.y += newFrame.height - frame.height   // keep top edge fixed
+        newFrame.size = frame.size
+        w.setFrame(newFrame, display: true, animate: true)
+        w.center()
     }
 
     // MARK: - Recording flow (Loom-style floating HUD; main window hidden during capture)

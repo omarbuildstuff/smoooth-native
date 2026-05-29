@@ -9,6 +9,7 @@ struct RecorderView: View {
     @ObservedObject var coordinator: RecordingCoordinator
     var onStart: (RecordingOptions) -> Void
     var onBack: () -> Void
+    var onSize: (CGSize) -> Void = { _ in }
 
     @Environment(\.theme) private var theme
 
@@ -27,47 +28,49 @@ struct RecorderView: View {
     @State private var micStatus: PermissionsManager.Status = .notDetermined
 
     var body: some View {
-        ZStack {
-            theme.background.ignoresSafeArea()
-            VStack(spacing: 18) {
-                HStack(spacing: 10) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous).fill(theme.primary.opacity(0.12))
-                        Image(systemName: "record.circle").font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.primary)
-                    }.frame(width: 36, height: 36)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("New Recording").font(.system(size: 17, weight: .bold)).foregroundStyle(theme.foreground)
-                        Text("Full screen · cinematic auto-zoom").font(.system(size: 11)).foregroundStyle(theme.mutedForeground)
-                    }
-                    Spacer()
+        VStack(spacing: 18) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: theme.radiusMd, style: .continuous).fill(theme.primary.opacity(0.12))
+                    Image(systemName: "record.circle").font(.system(size: 16, weight: .semibold)).foregroundStyle(theme.primary)
+                }.frame(width: 36, height: 36)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("New Recording").font(.system(size: 17, weight: .bold)).foregroundStyle(theme.foreground)
+                    Text("Full screen · cinematic auto-zoom").font(.system(size: 11)).foregroundStyle(theme.mutedForeground)
                 }
-
-                optionsForm
-                permissionsSection
-
-                if let errorMessage {
-                    Text(errorMessage).font(.system(size: 12)).foregroundStyle(theme.destructive)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                HStack {
-                    Button("Back") { onBack() }.buttonStyle(SoftButtonStyle(theme: theme))
-                    Spacer()
-                    Button { Task { await ensureAndStart() } } label: {
-                        Label(requesting ? "Checking…" : "Record Full Screen", systemImage: "record.circle.fill").frame(width: 180)
-                    }
-                    .buttonStyle(PremiumButtonStyle(theme: theme, height: 40))
-                    .disabled(requesting || coordinator.state != .idle)
-                }
-                .padding(.top, 2)
+                Spacer()
             }
-            .padding(26)
-            .frame(width: 480)
-            .background(theme.card)
-            .clipShape(RoundedRectangle(cornerRadius: theme.radiusXl, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: theme.radiusXl, style: .continuous).strokeBorder(theme.border, lineWidth: 1))
-            .shadow(color: .black.opacity(0.3), radius: 24, x: 0, y: 12)
+
+            optionsForm
+            permissionsSection
+
+            if let errorMessage {
+                Text(errorMessage).font(.system(size: 12)).foregroundStyle(theme.destructive)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack {
+                Button("Back") { onBack() }.buttonStyle(SoftButtonStyle(theme: theme))
+                Spacer()
+                Button { Task { await ensureAndStart() } } label: {
+                    Label(requesting ? "Checking…" : "Record Full Screen", systemImage: "record.circle.fill")
+                }
+                .buttonStyle(PremiumButtonStyle(theme: theme, height: 40))
+                .disabled(requesting || coordinator.state != .idle)
+            }
+            .padding(.top, 2)
         }
+        .padding(26)
+        .frame(width: 480)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(theme.card)
+        // Report the rendered card size so the window can shrink to fit it (no black margin).
+        .background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { onSize(proxy.size) }
+                .onChange(of: proxy.size) { _, s in onSize(s) }
+        })
         .onAppear { coordinator.enumerateDevices(); Task { await refresh() } }
     }
 
