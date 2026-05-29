@@ -335,7 +335,7 @@ private struct AudioPanel: View {
             PanelSection(title: "Sync", icon: "arrow.left.arrow.right") {
                 if model.webcamVideoURL != nil {
                     LabeledSlider(title: "Webcam vs Audio (s)", value: $model.webcamOffset,
-                                  range: -2...2, step: 0.01, decimals: 2)
+                                  range: -5...5, step: 0.01, decimals: 2)
                     HStack(spacing: 8) {
                         Button("Auto") { Task { await model.recomputeWebcamOffset() } }
                             .buttonStyle(SoftButtonStyle(theme: theme, height: 26))

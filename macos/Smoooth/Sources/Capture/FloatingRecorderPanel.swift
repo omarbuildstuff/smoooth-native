@@ -43,6 +43,67 @@ final class RecordingHUDController {
     }
 }
 
+/// Centered pre-warm countdown overlay shown while the camera/mic/screen warm up
+/// (before writing begins). Excluded from capture like the HUD.
+@MainActor
+final class CountdownOverlayController {
+    private var panel: NSPanel?
+
+    func show(coordinator: RecordingCoordinator, theme: Theme) {
+        hide()
+        let size = NSSize(width: 220, height: 220)
+        let view = CountdownOverlayView(coordinator: coordinator)
+            .environment(\.theme, theme)
+            .frame(width: size.width, height: size.height)
+
+        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                            styleMask: [.nonactivatingPanel, .borderless],
+                            backing: .buffered, defer: false)
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.sharingType = .none                 // never captured
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.contentView = NSHostingView(rootView: view)
+        if let vf = NSScreen.main?.visibleFrame {
+            panel.setFrameOrigin(NSPoint(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2))
+        }
+        panel.orderFrontRegardless()
+        self.panel = panel
+    }
+
+    func hide() { panel?.orderOut(nil); panel = nil }
+}
+
+private struct CountdownOverlayView: View {
+    @ObservedObject var coordinator: RecordingCoordinator
+    @Environment(\.theme) private var theme
+    var body: some View {
+        ZStack {
+            Circle().fill(theme.card.opacity(0.94))
+                .overlay(Circle().strokeBorder(theme.border, lineWidth: 1))
+                .shadow(color: .black.opacity(0.25), radius: 20)
+            if let c = coordinator.countdown, c > 0 {
+                Text("\(c)")
+                    .font(.system(size: 104, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(theme.foreground)
+                    .contentTransition(.numericText())
+            } else {
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.large).tint(theme.primary)
+                    Text("Starting…").font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.mutedForeground)
+                }
+            }
+        }
+        .frame(width: 220, height: 220)
+        .animation(.easeInOut(duration: 0.2), value: coordinator.countdown)
+    }
+}
+
 /// The compact HUD content: drag grip, pulsing REC dot, elapsed time, Stop, Cancel.
 private struct RecordingHUDView: View {
     @ObservedObject var coordinator: RecordingCoordinator

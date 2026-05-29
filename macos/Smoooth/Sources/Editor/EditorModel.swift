@@ -344,21 +344,14 @@ final class EditorModel {
 
     // MARK: - Webcam
 
-    /// Auto-detects the webcam→screen timeline offset (camera warmup). Prefers the
-    /// capture-measured value in metadata; for older recordings without it, falls
-    /// back to the duration gap (both files stop together, so the webcam is shorter
-    /// by its warmup head start). Used on load and by the "Auto" sync button.
+    /// Auto-detects the webcam→screen timeline offset (camera warmup). The camera
+    /// starts later than screen capture but both stop together, so the webcam file
+    /// is shorter by exactly the warmup — i.e. the duration gap IS how far the
+    /// webcam sits into the screen/audio timeline. This is far more reliable than a
+    /// capture-time wall-clock estimate. Used on load and by the "Auto" sync button.
     func recomputeWebcamOffset() async {
-        guard webcamVideoURL != nil else { webcamOffset = 0; return }
-        var metaOffset: Double? = nil
-        if let murl = metadataURL, let meta = try? RecordingMetadata.load(murl) {
-            metaOffset = meta.webcamOffset
-        }
-        if let off = metaOffset, off > 0 {
-            webcamOffset = off
-        } else if let wurl = webcamVideoURL,
-                  let wDur = try? await FrameSource(url: wurl).duration(),
-                  wDur > 0, duration > wDur {
+        guard let wurl = webcamVideoURL else { webcamOffset = 0; return }
+        if let wDur = try? await FrameSource(url: wurl).duration(), wDur > 0, duration > wDur {
             webcamOffset = duration - wDur
         } else {
             webcamOffset = 0

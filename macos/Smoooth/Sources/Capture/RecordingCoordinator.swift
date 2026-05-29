@@ -32,6 +32,9 @@ public final class RecordingCoordinator: ObservableObject {
     @Published public private(set) var state: State = .idle
     @Published public private(set) var availableDevices = AvailableDevices()
     @Published public private(set) var lastError: String?
+    /// During `.preparing`: the pre-warm countdown — 3, 2, 1, then 0 ("starting…").
+    /// nil when not counting down.
+    @Published public private(set) var countdown: Int?
 
     // MARK: - Collaborators
 
@@ -73,6 +76,7 @@ public final class RecordingCoordinator: ObservableObject {
         guard state == .idle else { throw RecordingError.alreadyRecording }
         state = .preparing
         lastError = nil
+        countdown = nil
 
         do {
             try await preflightPermissions(options: options)
@@ -90,7 +94,8 @@ public final class RecordingCoordinator: ObservableObject {
             }
             self.mouseTracker = tracker
 
-            // --- Screen recorder. ---
+            // --- Screen recorder: start CAPTURING now (so screen + mic warm up) but
+            //     it drops frames until armed, so nothing is written yet. ---
             let recorder = ScreenRecorder(
                 outputURL: urls.screen,
                 geometry: geometry,
@@ -108,31 +113,82 @@ public final class RecordingCoordinator: ObservableObject {
             }
             self.screenRecorder = recorder
 
-            // --- Webcam recorder (separate file). ---
+            // --- Webcam: PRE-WARM the camera (running, not writing yet). ---
             if options.webcam, let webcamURL = urls.webcam {
                 let webcam = WebcamRecorder()
                 do {
-                    try await webcam.start(cameraDeviceID: options.cameraDeviceID, outputURL: webcamURL)
+                    try await webcam.prewarm(cameraDeviceID: options.cameraDeviceID)
                     self.webcamRecorder = webcam
                     self.activeWebcamURL = webcamURL
                 } catch {
-                    // Non-fatal: keep the screen recording going without webcam,
-                    // matching the original's tolerance of webcam failures.
+                    // Non-fatal: keep the screen recording going without webcam.
                     webcam.abort()
                     self.webcamRecorder = nil
                     self.activeWebcamURL = nil
                 }
             }
 
+            // --- Pre-warm countdown: wait until every stream is delivering frames
+            //     (camera warmup ~2.5s), capped at 5s. Then start all recorders
+            //     together so the files share t=0 — no warmup offset to compensate. ---
+            try await runStartCountdown()
+            guard state == .preparing else { throw RecordingError.notRecording } // cancelled mid-countdown
+
+            // Begin writing everywhere, synchronized: camera is warm, so its first
+            // written frame is immediate, matching the screen recorder's anchor.
+            if let webcam = webcamRecorder, let webcamURL = activeWebcamURL {
+                do { try await webcam.beginRecording(outputURL: webcamURL) }
+                catch { webcam.abort(); self.webcamRecorder = nil; self.activeWebcamURL = nil }
+            }
+            recorder.arm()
+
             self.activeGeometry = geometry
             self.activeScreenURL = urls.screen
             self.activeMetadataURL = urls.metadata
+            countdown = nil
             state = .recording
         } catch {
+            // Tear down any warming recorders on failure/cancel.
+            mouseTracker?.stop(); mouseTracker = nil
+            if let r = screenRecorder { await r.abort() }
+            webcamRecorder?.abort()
+            resetActiveState()
+            countdown = nil
             state = .idle
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             throw error
         }
+    }
+
+    /// Pre-warm countdown. Shows 3·2·1 (so the user can get ready) while every
+    /// capture stream warms up, then waits — up to a 5s cap — until they're all
+    /// delivering frames before returning. Camera warmup (~2.5s) finishes within
+    /// this window, so arming afterward starts every file at the same instant.
+    private func runStartCountdown() async throws {
+        let minShow = 3.0     // visible 3·2·1 get-ready beat
+        let maxWait = 5.0     // hard cap even if a stream is slow to warm
+        let tick = 0.1
+        var elapsed = 0.0
+        while true {
+            if state != .preparing { throw CancellationError() }
+            let remaining = minShow - elapsed
+            if remaining > 0 {
+                countdown = Int(ceil(remaining))     // 3, 2, 1
+            } else {
+                countdown = 0                         // "starting…"
+                if streamsReady() || elapsed >= maxWait { break }
+            }
+            try await Task.sleep(nanoseconds: UInt64(tick * 1_000_000_000))
+            elapsed += tick
+            if elapsed >= maxWait { break }
+        }
+    }
+
+    /// Whether every enabled capture stream has delivered its first frame.
+    private func streamsReady() -> Bool {
+        let screenWarm = screenRecorder?.isWarm ?? false
+        let webcamWarm = webcamRecorder?.isReady ?? true   // true when no webcam
+        return screenWarm && webcamWarm
     }
 
     // MARK: - Stop
@@ -153,31 +209,27 @@ public final class RecordingCoordinator: ObservableObject {
         let tracker = mouseTracker
         tracker?.stop()
 
+        // Stop screen + webcam concurrently so both streams end at ~the same instant.
+        // The webcam→screen duration gap (which the editor uses for camera-warmup
+        // re-sync) then reflects the true start offset, with no skew from finalizing
+        // one recorder before the other has stopped capturing.
+        let webcam = webcamRecorder
+        async let webcamStop: URL? = {
+            guard let webcam else { return nil }
+            return try? await webcam.stop()
+        }()
+
         let screenURL: URL
         do {
             screenURL = try await recorder.stop()
         } catch {
-            // Even on a writer error, attempt to clean up the rest.
-            await finalizeWebcamSilently()
+            _ = await webcamStop   // let the webcam finish/clean up too
             resetActiveState()
             state = .idle
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             throw error
         }
-
-        var webcamURL: URL? = nil
-        if let webcam = webcamRecorder {
-            webcamURL = try? await webcam.stop()
-        }
-
-        // Webcam timeline offset: the camera warms up later than the screen/mic
-        // stream, so the webcam file's time-0 lands `webcamOffset` seconds into the
-        // screen/mic timeline. The editor delays the webcam by this to re-sync.
-        let webcamOffset: Double = {
-            guard let screenWall = recorder.firstFrameWallClock,
-                  let webcamWall = webcamRecorder?.firstFrameWallClock else { return 0 }
-            return max(0, webcamWall - screenWall)
-        }()
+        let webcamURL = await webcamStop
 
         // Build + write metadata, rebasing timestamps to the first video frame.
         let drained = tracker?.drain() ?? (samples: [], cursors: [:])
@@ -186,8 +238,7 @@ public final class RecordingCoordinator: ObservableObject {
             cursors: drained.cursors,
             geometry: geometry,
             screenSize: primaryScreenPixelSize(),
-            videoStartWallClock: recorder.firstFrameWallClock,
-            webcamOffset: webcamOffset
+            videoStartWallClock: recorder.firstFrameWallClock
         )
         do {
             try metadata.write(to: metadataURL)
@@ -199,7 +250,6 @@ public final class RecordingCoordinator: ObservableObject {
                 screenSize: primaryScreenPixelSize(),
                 geometry: geometry,
                 syncOffset: 0,
-                webcamOffset: webcamOffset,
                 cursorImages: [:],
                 events: []
             )
@@ -239,6 +289,7 @@ public final class RecordingCoordinator: ObservableObject {
         }
 
         resetActiveState()
+        countdown = nil
         state = .idle
     }
 
@@ -421,12 +472,6 @@ public final class RecordingCoordinator: ObservableObject {
             at: recordingsDirectory(),
             withIntermediateDirectories: true
         )
-    }
-
-    private func finalizeWebcamSilently() async {
-        if let webcam = webcamRecorder {
-            _ = try? await webcam.stop()
-        }
     }
 
     private func resetActiveState() {

@@ -13,10 +13,9 @@ public final class WebcamRecorder: NSObject, @unchecked Sendable {
 
     private let session = AVCaptureSession()
     private let movieOutput = AVCaptureMovieFileOutput()
-    /// A parallel data output used solely to learn the wall-clock time of the
-    /// first delivered frame. The camera takes ~1–2.5s to warm up, so the webcam
-    /// file's time-0 lands that far into the screen/mic timeline; the coordinator
-    /// turns this into a `webcamOffset` so the editor can re-align the two files.
+    /// Parallel data output used only to detect when the camera has warmed up
+    /// (delivered its first frame), so the coordinator can start all recorders
+    /// together after a pre-warm countdown.
     private let dataOutput = AVCaptureVideoDataOutput()
     private let sessionQueue = DispatchQueue(label: "com.smoooth.webcam.session")
     private let dataQueue = DispatchQueue(label: "com.smoooth.webcam.data")
@@ -24,14 +23,9 @@ public final class WebcamRecorder: NSObject, @unchecked Sendable {
     private var finishContinuation: CheckedContinuation<URL, Error>?
 
     private let stateLock = NSLock()
-    private var _firstFrameWallClock: Double?
-
-    /// Wall-clock seconds (since 1970) of the first webcam frame, or nil if none
-    /// arrived. Compared against the screen recorder's anchor wall clock to
-    /// compute the webcam→screen timeline offset.
-    public var firstFrameWallClock: Double? {
-        stateLock.lock(); defer { stateLock.unlock() }; return _firstFrameWallClock
-    }
+    private var _ready = false
+    /// True once the camera has delivered its first frame (warmed up).
+    public var isReady: Bool { stateLock.lock(); defer { stateLock.unlock() }; return _ready }
 
     public override init() {
         super.init()
@@ -77,21 +71,33 @@ public final class WebcamRecorder: NSObject, @unchecked Sendable {
 
     // MARK: - Recording
 
-    /// Configures the session for the chosen camera (or the default) and begins
-    /// writing to `outputURL`. Throws on configuration failure.
-    public func start(cameraDeviceID: String?, outputURL: URL) async throws {
+    /// Pre-warms the camera: configures the session and starts it RUNNING, but does
+    /// not write a file yet. `isReady` flips true on the first delivered frame, so
+    /// the coordinator can wait for warmup before starting all recorders together.
+    public func prewarm(cameraDeviceID: String?) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async {
                 do {
                     try self.configureSession(cameraDeviceID: cameraDeviceID)
                     self.session.startRunning()
-                    try? FileManager.default.removeItem(at: outputURL)
-                    self.outputURL = outputURL
-                    self.movieOutput.startRecording(to: outputURL, recordingDelegate: self)
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
                 }
+            }
+        }
+    }
+
+    /// Begins writing the webcam file. Call after `prewarm`, in lockstep with the
+    /// screen recorder's `arm()`, so both files start at ~the same instant (the
+    /// camera is already warm, so its first written frame is immediate).
+    public func beginRecording(outputURL: URL) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sessionQueue.async {
+                try? FileManager.default.removeItem(at: outputURL)
+                self.outputURL = outputURL
+                self.movieOutput.startRecording(to: outputURL, recordingDelegate: self)
+                continuation.resume()
             }
         }
     }
@@ -165,7 +171,7 @@ public final class WebcamRecorder: NSObject, @unchecked Sendable {
         }
         session.addOutput(movieOutput)
 
-        // Parallel data output for first-frame timing (non-fatal if unavailable).
+        // Readiness probe (non-fatal if unavailable).
         if session.canAddOutput(dataOutput) {
             dataOutput.alwaysDiscardsLateVideoFrames = true
             dataOutput.setSampleBufferDelegate(self, queue: dataQueue)
@@ -179,20 +185,13 @@ public final class WebcamRecorder: NSObject, @unchecked Sendable {
     }
 }
 
-// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate (readiness probe)
 
 extension WebcamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
     public func captureOutput(_ output: AVCaptureOutput,
                               didOutput sampleBuffer: CMSampleBuffer,
                               from connection: AVCaptureConnection) {
-        // Stamp the first frame that lands after the movie file output is actually
-        // recording, so it matches the webcam file's time-0.
-        guard movieOutput.isRecording else { return }
-        stateLock.lock()
-        if _firstFrameWallClock == nil {
-            _firstFrameWallClock = Date().timeIntervalSince1970
-        }
-        stateLock.unlock()
+        stateLock.lock(); _ready = true; stateLock.unlock()
     }
 }
 

@@ -59,6 +59,28 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
     /// start anyway this many seconds after the first video frame.
     private let audioWarmupTimeout: Double = 1.0
 
+    /// Pre-warm gate. The stream starts capturing immediately so screen/audio warm
+    /// up, but frames are DROPPED until `arm()` is called — so the recording (and
+    /// its session anchor) begins at a moment chosen by the coordinator, in lockstep
+    /// with the (already-warm) webcam. `saw*` track whether each enabled stream has
+    /// delivered ≥1 sample, so the coordinator knows when everything is warm.
+    private var armed = false
+    private var sawVideo = false
+    private var sawSystemAudio = false
+    private var sawMicrophone = false
+
+    /// True once every enabled stream (video + requested audio) has delivered a
+    /// sample — i.e. capture is warm and arming will start writing immediately.
+    public var isWarm: Bool {
+        startLock.lock(); defer { startLock.unlock() }
+        return sawVideo
+            && (systemAudioInput == nil || sawSystemAudio)
+            && (micAudioInput == nil || sawMicrophone)
+    }
+
+    /// Begin writing: subsequent frames anchor the session and are recorded.
+    public func arm() { startLock.lock(); armed = true; startLock.unlock() }
+
     /// Guards the cross-thread scalars (`stopError`, `firstFrameWallClock`) that
     /// are written on the SCKit delegate / sample queues and read on the
     /// MainActor in `stop()` / by the coordinator. A small dedicated lock avoids
@@ -373,6 +395,8 @@ extension ScreenRecorder: SCStreamOutput {
         // Drop frames flagged as not-complete/idle by SCKit (e.g. paused).
         guard isCompleteFrame(sampleBuffer) else { return }
         guard let writer, let videoInput else { return }
+        markWarm(.video)
+        guard isArmed() else { return }   // pre-warming: capture runs, nothing written yet
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard ensureSessionStarted(pts: pts, stream: .video) else { return }
@@ -386,6 +410,8 @@ extension ScreenRecorder: SCStreamOutput {
 
     private func handleAudio(_ sampleBuffer: CMSampleBuffer, input: AVAssetWriterInput?, stream: StreamKind) {
         guard let writer, let input else { return }
+        markWarm(stream)
+        guard isArmed() else { return }   // pre-warming: capture runs, nothing written yet
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard ensureSessionStarted(pts: pts, stream: stream) else { return }
         // Drop pre-anchor audio so every track begins at the common origin.
@@ -449,6 +475,18 @@ extension ScreenRecorder: SCStreamOutput {
     private func anchor() -> CMTime {
         startLock.lock(); defer { startLock.unlock() }
         return anchorPTS
+    }
+
+    private func isArmed() -> Bool { startLock.lock(); defer { startLock.unlock() }; return armed }
+
+    private func markWarm(_ stream: StreamKind) {
+        startLock.lock()
+        switch stream {
+        case .video: sawVideo = true
+        case .systemAudio: sawSystemAudio = true
+        case .microphone: sawMicrophone = true
+        }
+        startLock.unlock()
     }
 
     /// SCKit attaches per-frame status; only `.complete` frames carry new pixels.

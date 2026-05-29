@@ -69,11 +69,12 @@ struct LayerPreview: NSViewRepresentable {
                     let item = AVPlayerItem(url: url)
                     let out = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
                     item.add(out); let p = AVPlayer(playerItem: item); p.actionAtItemEnd = .pause
-                    p.isMuted = true // audio comes from the dedicated audioPlayer
                     mainPlayer = p; mainOutput = out
-                    // Separate audio player on the same file, shiftable by audioOffset.
+                    // Dedicated audio player on the same file, used ONLY when the user
+                    // applies a non-zero audioOffset. By default the main player
+                    // carries the audio (sample-locked to the screen video).
                     let aItem = AVPlayerItem(url: url)
-                    let ap = AVPlayer(playerItem: aItem); ap.actionAtItemEnd = .pause
+                    let ap = AVPlayer(playerItem: aItem); ap.actionAtItemEnd = .pause; ap.isMuted = true
                     audioPlayer = ap
                 } else { mainPlayer = nil; mainOutput = nil; audioPlayer = nil }
             }
@@ -91,52 +92,67 @@ struct LayerPreview: NSViewRepresentable {
         private func render() {
             configurePlayers()
             guard let view, let player = mainPlayer else { return }
+
+            // ONE master clock. The main player carries screen video AND audio,
+            // sample-locked together. The webcam (separate file, late due to camera
+            // warmup) and an optional offset-audio player are SLAVED to the master
+            // and only re-seeked when they drift past a small threshold — nothing
+            // free-runs on its own clock, so sync can't wander.
+            let useOffsetAudio = abs(model.audioOffset) >= 0.001
+            player.isMuted = useOffsetAudio ? true : model.isMuted
+            player.volume = Float(model.isMuted ? 0 : model.volume)
+            audioPlayer?.isMuted = useOffsetAudio ? model.isMuted : true
             audioPlayer?.volume = Float(model.isMuted ? 0 : model.volume)
 
-            // Clock. Three streams share one playhead `t` (driven by the main video
-            // player) but each runs at its own offset: audio at `t − audioOffset`
-            // and webcam at `t − webcamOffset`. Before the webcam offset there is no
-            // camera footage yet, so it stays hidden.
-            let wcSeconds = model.currentTime - model.webcamOffset
-            let wcActive = wcSeconds >= 0
-            let wcTarget = CMTime(seconds: max(0, wcSeconds), preferredTimescale: 600)
-            let auTarget = CMTime(seconds: max(0, model.currentTime - model.audioOffset), preferredTimescale: 600)
-            let resync = abs(model.currentTime - lastClockWriteback) > 0.1
+            let wcActive = (model.currentTime - model.webcamOffset) >= 0
+
+            func seekTime(_ s: Double) -> CMTime { CMTime(seconds: max(0, s), preferredTimescale: 600) }
+
             if model.isPlaying {
-                let target = CMTime(seconds: model.currentTime, preferredTimescale: 600)
                 if player.timeControlStatus != .playing {
-                    player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero); player.play()
-                } else if resync {
-                    player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+                    player.seek(to: seekTime(model.currentTime), toleranceBefore: .zero, toleranceAfter: .zero)
+                    player.play()
                 }
-                if let ap = audioPlayer {
+                let masterT = CMTimeGetSeconds(player.currentTime())
+
+                // Offset audio (only when audioOffset != 0): slave to master − offset,
+                // loose threshold so corrections don't glitch the audio.
+                if useOffsetAudio, let ap = audioPlayer {
+                    let want = masterT - model.audioOffset
                     if ap.timeControlStatus != .playing {
-                        ap.seek(to: auTarget, toleranceBefore: .zero, toleranceAfter: .zero); ap.play()
-                    } else if resync {
-                        ap.seek(to: auTarget, toleranceBefore: .zero, toleranceAfter: .zero)
+                        ap.seek(to: seekTime(want), toleranceBefore: .zero, toleranceAfter: .zero); ap.play()
+                    } else if abs(CMTimeGetSeconds(ap.currentTime()) - want) > 0.12 {
+                        ap.seek(to: seekTime(want), toleranceBefore: .zero, toleranceAfter: .zero)
                     }
+                } else if let ap = audioPlayer, ap.timeControlStatus == .playing {
+                    ap.pause()
                 }
+
+                // Webcam: slave to master − webcamOffset, tight ~1-frame threshold.
                 if let wp = webcamPlayer {
                     if wcActive {
+                        let want = masterT - model.webcamOffset
                         if wp.timeControlStatus != .playing {
-                            wp.seek(to: wcTarget, toleranceBefore: .zero, toleranceAfter: .zero); wp.play()
-                        } else if resync {
-                            wp.seek(to: wcTarget, toleranceBefore: .zero, toleranceAfter: .zero)
+                            wp.seek(to: seekTime(want), toleranceBefore: .zero, toleranceAfter: .zero); wp.play()
+                        } else if abs(CMTimeGetSeconds(wp.currentTime()) - want) > 0.04 {
+                            wp.seek(to: seekTime(want), toleranceBefore: .zero, toleranceAfter: .zero)
                         }
                     } else if wp.timeControlStatus == .playing {
                         wp.pause()
                     }
                 }
-                let t = CMTimeGetSeconds(player.currentTime())
-                model.currentTime = t; lastClockWriteback = t
-                if t >= model.duration, model.duration > 0 { model.pause(); player.pause(); audioPlayer?.pause(); webcamPlayer?.pause() }
+
+                model.currentTime = masterT; lastClockWriteback = masterT
+                if masterT >= model.duration, model.duration > 0 {
+                    model.pause(); player.pause(); audioPlayer?.pause(); webcamPlayer?.pause()
+                }
             } else {
                 if player.timeControlStatus == .playing { player.pause(); audioPlayer?.pause(); webcamPlayer?.pause() }
-                let target = CMTime(seconds: model.currentTime, preferredTimescale: 600)
-                if abs(CMTimeGetSeconds(player.currentTime()) - model.currentTime) > 0.033 {
-                    player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
-                    audioPlayer?.seek(to: auTarget, toleranceBefore: .zero, toleranceAfter: .zero)
-                    webcamPlayer?.seek(to: wcTarget, toleranceBefore: .zero, toleranceAfter: .zero)
+                let mt = model.currentTime
+                if abs(CMTimeGetSeconds(player.currentTime()) - mt) > 0.033 {
+                    player.seek(to: seekTime(mt), toleranceBefore: .zero, toleranceAfter: .zero)
+                    if useOffsetAudio { audioPlayer?.seek(to: seekTime(mt - model.audioOffset), toleranceBefore: .zero, toleranceAfter: .zero) }
+                    webcamPlayer?.seek(to: seekTime(mt - model.webcamOffset), toleranceBefore: .zero, toleranceAfter: .zero)
                 }
             }
 

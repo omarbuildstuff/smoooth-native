@@ -8,6 +8,7 @@ struct ContentView: View {
     @StateObject private var recorder = RecordingCoordinator()
     @State private var screen: Screen = .home
     @State private var hud = RecordingHUDController()
+    @State private var countdownHUD = CountdownOverlayController()
     @State private var mainWindow: NSWindow?
 
     enum Screen { case home, recorder, editor }
@@ -70,12 +71,16 @@ struct ContentView: View {
     private func startRecording(_ options: RecordingOptions) {
         // Hide the main window BEFORE capture starts so Smoooth never appears in the recording.
         mainWindow?.orderOut(nil)
+        // Pre-warm countdown overlay (camera/mic/screen warm up; writing starts at 0).
+        countdownHUD.show(coordinator: recorder, theme: theme)
         Task {
             do {
                 try await recorder.start(options: options)
+                countdownHUD.hide()
                 hud.show(coordinator: recorder, theme: theme, recStart: Date(),
                          onStop: { stopRecording() }, onCancel: { cancelRecording() })
             } catch {
+                countdownHUD.hide()
                 mainWindow?.makeKeyAndOrderFront(nil)
                 screen = .recorder
                 presentAlert("Recording failed", message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)

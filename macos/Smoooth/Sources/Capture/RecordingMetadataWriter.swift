@@ -21,9 +21,6 @@ struct RecordingMetadataWriter: Codable {
     var screenSize: SizeI
     var geometry: RecordingGeometry
     var syncOffset: Double
-    /// Seconds the webcam stream started after the screen/mic timeline (camera
-    /// warmup). The editor delays the webcam by this to keep face/voice in sync.
-    var webcamOffset: Double
     var cursorImages: [String: CursorImagePayload]
     var events: [MetaDataItem]
 
@@ -54,8 +51,7 @@ extension RecordingMetadataWriter {
                       cursors: [String: CapturedCursorImage],
                       geometry: RecordingGeometry,
                       screenSize: SizeI,
-                      videoStartWallClock: Double?,
-                      webcamOffset: Double = 0) -> RecordingMetadataWriter {
+                      videoStartWallClock: Double?) -> RecordingMetadataWriter {
         let originX = Double(geometry.x)
         let originY = Double(geometry.y)
         let maxX = originX + Double(geometry.width)
@@ -111,7 +107,6 @@ extension RecordingMetadataWriter {
             screenSize: screenSize,
             geometry: geometry,
             syncOffset: 0,
-            webcamOffset: webcamOffset,
             cursorImages: cursorPayloads,
             events: events
         )
