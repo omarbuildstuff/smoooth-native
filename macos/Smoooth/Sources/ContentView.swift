@@ -44,9 +44,23 @@ struct ContentView: View {
         panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie, UTType(filenameExtension: "webm") ?? .movie]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let metadataURL = url.deletingPathExtension().appendingPathExtension("json")
+        // A Smoooth recording is "<base>-screen.mp4" with sibling "<base>.json" metadata
+        // and optional "<base>-webcam.mp4". Resolve those so opening a recording restores
+        // its cursor metadata + webcam; otherwise fall back to "<video>.json".
+        let fm = FileManager.default
+        var metadataURL = url.deletingPathExtension().appendingPathExtension("json")
+        var webcamURL: URL? = nil
+        let name = url.lastPathComponent
+        if name.hasSuffix("-screen.mp4") {
+            let base = String(name.dropLast("-screen.mp4".count))
+            let dir = url.deletingLastPathComponent()
+            let sibMeta = dir.appendingPathComponent(base + ".json")
+            if fm.fileExists(atPath: sibMeta.path) { metadataURL = sibMeta }
+            let sibCam = dir.appendingPathComponent(base + "-webcam.mp4")
+            if fm.fileExists(atPath: sibCam.path) { webcamURL = sibCam }
+        }
         Task {
-            await model.loadProject(videoURL: url, metadataURL: metadataURL, webcamVideoURL: nil)
+            await model.loadProject(videoURL: url, metadataURL: metadataURL, webcamVideoURL: webcamURL)
             screen = .editor
         }
     }

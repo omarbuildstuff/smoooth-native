@@ -12,7 +12,13 @@ struct HomeView: View {
     let onImport: () -> Void
     let onRecord: () -> Void
 
-    @State private var appeared = false
+    @State private var appeared: Bool
+
+    init(startRevealed: Bool = false, onImport: @escaping () -> Void, onRecord: @escaping () -> Void) {
+        self.onImport = onImport
+        self.onRecord = onRecord
+        _appeared = State(initialValue: startRevealed)
+    }
 
     var body: some View {
         GeometryReader { geo in

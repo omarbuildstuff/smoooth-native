@@ -5,7 +5,10 @@ import SmooothCore
 /// Decodes the recording metadata JSON written by the capture engine (and the
 /// original Electron app) into events + cursor bitmaps the renderer consumes.
 struct RecordingMetadata: Decodable {
-    struct Geo: Decodable { let x: Double; let y: Double; let width: Double; let height: Double }
+    // x/y are optional: `geometry` carries them, but `screenSize` is written as
+    // width/height only — if x/y were required, decoding screenSize would throw and
+    // the whole metadata load would fail (→ no events, no cursor, no auto-zoom).
+    struct Geo: Decodable { let x: Double?; let y: Double?; let width: Double; let height: Double }
     struct CursorImageData: Decodable {
         let width: Int
         let height: Int
@@ -27,7 +30,7 @@ struct RecordingMetadata: Decodable {
 
     var recordingGeometry: RectD? {
         guard let g = geometry, g.width > 0, g.height > 0 else { return nil }
-        return RectD(x: g.x, y: g.y, width: g.width, height: g.height)
+        return RectD(x: g.x ?? 0, y: g.y ?? 0, width: g.width, height: g.height)
     }
 
     /// Builds renderable cursor bitmaps keyed by `cursorImageKey`.
