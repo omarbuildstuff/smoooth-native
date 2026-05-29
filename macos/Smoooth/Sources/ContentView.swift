@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var model = EditorModel()
     @StateObject private var recorder = RecordingCoordinator()
     @State private var screen: Screen = .home
+    @State private var hud = RecordingHUDController()
+    @State private var mainWindow: NSWindow?
 
     enum Screen { case home, recorder, editor }
 
@@ -19,8 +21,8 @@ struct ContentView: View {
                 HomeView(onImport: importVideo, onRecord: { screen = .recorder })
             case .recorder:
                 RecorderView(coordinator: recorder,
-                             onFinished: { result in loadRecording(result) },
-                             onCancel: { screen = .home })
+                             onStart: { options in startRecording(options) },
+                             onBack: { screen = .home })
             case .editor:
                 EditorView(model: model)
             }
@@ -28,15 +30,60 @@ struct ContentView: View {
         .frame(minWidth: 1100, minHeight: 740)
         .environment(\.theme, theme)
         .preferredColorScheme(model.mode == "dark" ? .dark : .light)
+        .background(WindowAccessor { if let w = $0 { mainWindow = w } })
     }
 
-    private func loadRecording(_ result: RecordingResult) {
+    // MARK: - Recording flow (Loom-style floating HUD; main window hidden during capture)
+
+    private func startRecording(_ options: RecordingOptions) {
+        // Hide the main window BEFORE capture starts so Smoooth never appears in the recording.
+        mainWindow?.orderOut(nil)
         Task {
-            await model.loadProject(videoURL: result.screenVideoURL,
-                                    metadataURL: result.metadataURL,
-                                    webcamVideoURL: result.webcamVideoURL)
-            screen = .editor
+            do {
+                try await recorder.start(options: options)
+                hud.show(coordinator: recorder, theme: theme, recStart: Date(),
+                         onStop: { stopRecording() }, onCancel: { cancelRecording() })
+            } catch {
+                mainWindow?.makeKeyAndOrderFront(nil)
+                screen = .recorder
+                presentAlert("Recording failed", message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            }
         }
+    }
+
+    private func stopRecording() {
+        Task {
+            do {
+                let result = try await recorder.stop()
+                hud.hide()
+                await model.loadProject(videoURL: result.screenVideoURL,
+                                        metadataURL: result.metadataURL,
+                                        webcamVideoURL: result.webcamVideoURL)
+                screen = .editor
+                mainWindow?.makeKeyAndOrderFront(nil)
+            } catch {
+                hud.hide()
+                screen = .home
+                mainWindow?.makeKeyAndOrderFront(nil)
+                presentAlert("Couldn't save recording", message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            }
+        }
+    }
+
+    private func cancelRecording() {
+        Task {
+            await recorder.cancel()
+            hud.hide()
+            screen = .home
+            mainWindow?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func presentAlert(_ title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.runModal()
     }
 
     private func importVideo() {
