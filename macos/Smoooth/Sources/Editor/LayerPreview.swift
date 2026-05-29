@@ -42,6 +42,7 @@ struct LayerPreview: NSViewRepresentable {
 
         // Layers
         private let canvas = CALayer()          // output rect; background lives here
+        private let bgImageLayer = CALayer()     // wallpaper/image background (flipped: upright)
         private let shadowLayer = CALayer()      // carries the frame shadow (zoomed)
         private let frameClip = CALayer()        // rounded, clips video+cursor (zoomed)
         private let videoLayer = CALayer()
@@ -59,8 +60,10 @@ struct LayerPreview: NSViewRepresentable {
             view = v
             v.wantsLayer = true
             v.layer?.backgroundColor = NSColor.black.cgColor
-            // Top-left origin so all math matches SceneLayout/ZoomTransform.
-            canvas.isGeometryFlipped = true
+            // Layers use native bottom-left geometry; all top-down coords from
+            // SceneLayout/ZoomTransform are converted via `H - y` in layout(). The
+            // video pixel buffer (CIImage origin) needs the contents flipped to read
+            // upright — verified against the real AVPlayerItemVideoOutput path.
             canvas.masksToBounds = true
             v.layer?.addSublayer(canvas)
 
@@ -69,8 +72,15 @@ struct LayerPreview: NSViewRepresentable {
             frameClip.addSublayer(videoLayer)
             frameClip.addSublayer(cursorLayer)
             videoLayer.contentsGravity = .resize
+            videoLayer.isGeometryFlipped = true
             cursorLayer.contentsGravity = .resizeAspect
+            cursorLayer.isGeometryFlipped = true   // render cursor image upright; anchor stays top-down
             webcamLayer.masksToBounds = true
+            bgImageLayer.isGeometryFlipped = true      // image is a normal CGImage → upright
+            bgImageLayer.contentsGravity = .resizeAspectFill
+            bgImageLayer.masksToBounds = true
+            bgImageLayer.isHidden = true
+            canvas.addSublayer(bgImageLayer)
             canvas.addSublayer(shadowLayer)
             canvas.addSublayer(frameClip)
             canvas.addSublayer(webcamLayer)
@@ -189,23 +199,25 @@ struct LayerPreview: NSViewRepresentable {
             let zt = ZoomTransform.calculate(currentTime: model.currentTime, zoomRegions: model.zoomRegions,
                                              metadata: model.metadata, recordingGeometry: recGeo,
                                              frameContent: SizeD(width: lay.frameContentWidth, height: lay.frameContentHeight))
-            applyZoom(zt, contentRect: contentRect)
+            applyZoom(zt, contentRect: contentRect, outH: outH)
 
             updateWebcam(outW: outW, outH: outH, lay: lay, zt: zt, scale: scale)
             CATransaction.commit()
         }
 
-        private func applyZoom(_ zt: ZoomTransformResult, contentRect: CGRect) {
+        private func applyZoom(_ zt: ZoomTransformResult, contentRect: CGRect, outH: Double) {
             // anchor at the zoom origin (fraction); position so that, at scale s, the
             // origin lands at frameXY + originPx + s*(tx,ty) — matching SceneRenderer.
+            // Canvas uses bottom-left geometry, so the top-down Y is flipped: outH - y.
             let s = zt.scale
             let originPxX = zt.originX * contentRect.width
             let originPxY = zt.originY * contentRect.height
+            let topDownY = contentRect.minY + originPxY + s * zt.translateY
             for l in [shadowLayer, frameClip] {
                 l.bounds = CGRect(x: 0, y: 0, width: contentRect.width, height: contentRect.height)
-                l.anchorPoint = CGPoint(x: zt.originX, y: zt.originY)
+                l.anchorPoint = CGPoint(x: zt.originX, y: 1 - zt.originY)        // flip anchor Y
                 l.position = CGPoint(x: contentRect.minX + originPxX + s * zt.translateX,
-                                     y: contentRect.minY + originPxY + s * zt.translateY)
+                                     y: outH - topDownY)                          // flip position Y
                 l.transform = CATransform3DMakeScale(s, s, 1)
             }
         }
@@ -215,11 +227,12 @@ struct LayerPreview: NSViewRepresentable {
             switch bg.type {
             case .color:
                 gradientLayer?.removeFromSuperlayer(); gradientLayer = nil
-                canvas.contents = nil
+                bgImageLayer.isHidden = true; bgImageLayer.contents = nil
                 canvas.backgroundColor = ColorParse.cgColor(bg.color ?? "#101820")
             case .gradient:
-                canvas.contents = nil; canvas.backgroundColor = NSColor.clear.cgColor
-                let g = gradientLayer ?? { let l = CAGradientLayer(); canvas.insertSublayer(l, at: 0); gradientLayer = l; return l }()
+                bgImageLayer.isHidden = true; bgImageLayer.contents = nil
+                canvas.backgroundColor = NSColor.clear.cgColor
+                let g = gradientLayer ?? { let l = CAGradientLayer(); canvas.insertSublayer(l, below: shadowLayer); gradientLayer = l; return l }()
                 g.frame = CGRect(x: 0, y: 0, width: outW, height: outH)
                 g.colors = [ColorParse.cgColor(bg.gradientStart ?? "#4f46e5"), ColorParse.cgColor(bg.gradientEnd ?? "#0ea5e9")]
                 let dir = bg.gradientDirection ?? "to bottom right"
@@ -228,8 +241,9 @@ struct LayerPreview: NSViewRepresentable {
             case .image, .wallpaper:
                 gradientLayer?.removeFromSuperlayer(); gradientLayer = nil
                 canvas.backgroundColor = NSColor.black.cgColor
-                canvas.contentsGravity = .resizeAspectFill
-                canvas.contents = model.backgroundImage
+                bgImageLayer.isHidden = false
+                bgImageLayer.frame = CGRect(x: 0, y: 0, width: outW, height: outH)
+                bgImageLayer.contents = model.backgroundImage
             }
         }
 
@@ -300,7 +314,7 @@ struct LayerPreview: NSViewRepresentable {
                 let p = (model.currentTime - click.timestamp) / cs.clickScaleDuration
                 sc = 1 - (1 - cs.clickScaleAmount) * sin(Easing.curve(cs.clickScaleEasing)(p) * .pi)
             }
-            cursorLayer.position = CGPoint(x: cx, y: cy)
+            cursorLayer.position = CGPoint(x: cx, y: contentRect.height - cy)   // frameClip is bottom-left
             cursorLayer.transform = CATransform3DMakeScale(sc, sc, 1)
         }
 
@@ -320,8 +334,10 @@ struct LayerPreview: NSViewRepresentable {
                 w *= m; h *= m
             }
             let rect = Geometry.webcamRect(for: model.webcamPosition, width: w, height: h, outputWidth: outW, outputHeight: outH)
-            webcamLayer.frame = CGRect(x: rect.x, y: rect.y, width: rect.width, height: rect.height)
+            // canvas is bottom-left → flip the top-down rect.y
+            webcamLayer.frame = CGRect(x: rect.x, y: outH - rect.y - rect.height, width: rect.width, height: rect.height)
             webcamLayer.contentsGravity = .resizeAspectFill
+            webcamLayer.isGeometryFlipped = true   // webcam frame is a video buffer → upright
             let maxR = min(w, h) / 2
             webcamLayer.cornerRadius = ws.shape == .circle ? maxR : maxR * (ws.borderRadius / 50)
             if ws.shadowBlur > 0 {
@@ -332,17 +348,16 @@ struct LayerPreview: NSViewRepresentable {
         }
 
         private func gradientPoints(_ dir: String) -> (CGPoint, CGPoint) {
-            // canvas is geometry-flipped (top-left), CAGradientLayer uses unit coords (0,0)=bottomLeft normally;
-            // with isGeometryFlipped the y is flipped too, so treat (0,0)=top-left.
+            // CAGradientLayer unit space: (0,0) = bottom-left, (1,1) = top-right.
             switch dir {
-            case "to bottom": return (CGPoint(x: 0.5, y: 0), CGPoint(x: 0.5, y: 1))
-            case "to top": return (CGPoint(x: 0.5, y: 1), CGPoint(x: 0.5, y: 0))
+            case "to bottom": return (CGPoint(x: 0.5, y: 1), CGPoint(x: 0.5, y: 0))
+            case "to top": return (CGPoint(x: 0.5, y: 0), CGPoint(x: 0.5, y: 1))
             case "to right": return (CGPoint(x: 0, y: 0.5), CGPoint(x: 1, y: 0.5))
             case "to left": return (CGPoint(x: 1, y: 0.5), CGPoint(x: 0, y: 0.5))
-            case "to bottom left": return (CGPoint(x: 1, y: 0), CGPoint(x: 0, y: 1))
-            case "to top right": return (CGPoint(x: 0, y: 1), CGPoint(x: 1, y: 0))
-            case "to top left": return (CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 0))
-            default: return (CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)) // to bottom right
+            case "to bottom left": return (CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 0))
+            case "to top right": return (CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1))
+            case "to top left": return (CGPoint(x: 1, y: 0), CGPoint(x: 0, y: 1))
+            default: return (CGPoint(x: 0, y: 1), CGPoint(x: 1, y: 0)) // to bottom right
             }
         }
     }
