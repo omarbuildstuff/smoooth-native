@@ -386,6 +386,102 @@ public enum SceneRenderer {
         }
     }
 
+    // MARK: - Bake cursor into the raw video frame (for the GPU preview)
+
+    /// Returns a copy of `video` with the cursor (system/bayzo/synthetic) + click
+    /// ripple baked in at the recorded pixel position. Used by the live GPU preview,
+    /// which then GPU-transforms the whole image (zoom/frame) — so the cursor rides
+    /// the video exactly and can't drift. `video` is the raw frame at recording
+    /// pixel size; coordinates are top-down recording pixels (Y flipped for the
+    /// bottom-left CGContext).
+    public static func bakeCursor(into video: CGImage, model: SceneModel,
+                                  inputs: SceneFrameInputs, currentTime: Double) -> CGImage {
+        let cs = model.cursorStyles
+        guard cs.showCursor, let recGeo = model.recordingGeometry else { return video }
+        let W = video.width, H = video.height
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: srgb, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return video }
+        ctx.draw(video, in: CGRect(x: 0, y: 0, width: W, height: H))
+
+        // recording px -> video px (video is recording-sized), Y flipped to bottom-left.
+        let sx = Double(W) / recGeo.width, sy = Double(H) / recGeo.height
+        func pt(_ x: Double, _ y: Double) -> (Double, Double) { (x * sx, Double(H) - y * sy) }
+
+        // Click ripples.
+        if cs.clickRippleEffect, let comps = ColorParse.rgbaFloats(cs.clickRippleColor) {
+            for click in model.metadata where click.type == .click && (click.pressed ?? false)
+                && currentTime >= click.timestamp && currentTime < click.timestamp + cs.clickRippleDuration {
+                let progress = (currentTime - click.timestamp) / cs.clickRippleDuration
+                let eased = Easing.easeInOutQuint(progress)
+                let r = eased * cs.clickRippleSize * sx
+                let (cx, cy) = pt(click.x, click.y)
+                ctx.setFillColor(CGColor(colorSpace: srgb, components: [comps.r, comps.g, comps.b, comps.a * CGFloat(1 - eased)])!)
+                ctx.fillEllipse(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+            }
+        }
+
+        // Cursor at the last event.
+        let idx = ZoomTransform.findLastMetadataIndex(model.metadata, currentTime)
+        guard idx > -1 else { return ctx.makeImage() ?? video }
+        let e = model.metadata[idx]
+        let (cx, cy) = pt(e.x, e.y)
+
+        // click-scale
+        var scale = 1.0
+        if cs.clickScaleEffect, let click = model.metadata.last(where: {
+            $0.type == .click && ($0.pressed ?? false) && $0.timestamp <= currentTime && $0.timestamp > currentTime - cs.clickScaleDuration }) {
+            let p = (currentTime - click.timestamp) / cs.clickScaleDuration
+            scale = 1 - (1 - cs.clickScaleAmount) * sin(Easing.curve(cs.clickScaleEasing)(p) * .pi)
+        }
+
+        // Resolve image + hotspot (in image px) + draw size (in video px).
+        var img: CGImage?
+        var hotX = 0.0, hotY = 0.0, drawW = 0.0, drawH = 0.0
+        switch cs.theme {
+        case .system:
+            if let k = e.cursorImageKey, let b = inputs.cursorBitmaps[k] {
+                img = b.image; drawW = b.width * sx; drawH = b.height * sx
+                hotX = (b.xhot / b.width) * drawW; hotY = (b.yhot / b.height) * drawH
+            }
+        case .bayzo:
+            if let b = inputs.customCursor {
+                let targetH = cs.size * 2.2 * sx
+                let s = targetH / b.height
+                img = b.image; drawW = b.width * s; drawH = b.height * s
+                hotX = (b.xhot / b.width) * drawW; hotY = (b.yhot / b.height) * drawH
+            }
+        case .classic, .dot, .highlight:
+            // Draw synthetic directly in a top-left sub-pass (it uses top-left math).
+            bakeSynthetic(ctx, theme: cs.theme, sizePx: cs.size * sx, centerX: cx, centerYBottomLeft: cy, scale: scale, H: H)
+            return ctx.makeImage() ?? video
+        }
+        guard let cursorImg = img else { return ctx.makeImage() ?? video }
+
+        // Draw the upright cursor image into the bottom-left context with hotspot at (cx,cy).
+        ctx.saveGState()
+        // scale around hotspot
+        ctx.translateBy(x: cx, y: cy); ctx.scaleBy(x: scale, y: scale); ctx.translateBy(x: -cx, y: -cy)
+        let rx = cx - hotX
+        let ry = cy - (drawH - hotY)   // bottom-left origin of the image rect
+        ctx.translateBy(x: rx, y: ry + drawH); ctx.scaleBy(x: 1, y: -1)   // flip image upright
+        ctx.draw(cursorImg, in: CGRect(x: 0, y: 0, width: drawW, height: drawH))
+        ctx.restoreGState()
+        return ctx.makeImage() ?? video
+    }
+
+    /// Synthetic cursor in the bottom-left bake context (center at cx,cy bottom-left).
+    private static func bakeSynthetic(_ ctx: CGContext, theme: CursorTheme, sizePx: Double,
+                                      centerX cx: Double, centerYBottomLeft cy: Double, scale: Double, H: Int) {
+        // drawSyntheticCursor expects a top-left flipped context; wrap with a flip.
+        ctx.saveGState()
+        ctx.translateBy(x: 0, y: CGFloat(H)); ctx.scaleBy(x: 1, y: -1)   // -> top-left
+        let topY = Double(H) - cy
+        ctx.translateBy(x: cx, y: topY); ctx.scaleBy(x: scale, y: scale); ctx.translateBy(x: -cx, y: -topY)
+        drawSyntheticCursor(ctx, theme: theme, x: cx, y: topY, size: sizePx)
+        ctx.restoreGState()
+    }
+
     // MARK: - Webcam
 
     static func drawWebcam(_ ctx: CGContext, model: SceneModel, webcam: CGImage, currentTime: Double,
