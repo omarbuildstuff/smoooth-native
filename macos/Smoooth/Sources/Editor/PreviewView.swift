@@ -37,11 +37,11 @@ struct PreviewView: NSViewRepresentable {
         private var mainOutput: AVPlayerItemVideoOutput?
         private var webcamPlayer: AVPlayer?
         private var webcamOutput: AVPlayerItemVideoOutput?
-        private var timer: Timer?
+        private var displayLink: CADisplayLink?
         private var configuredVideoURL: URL?
         private var configuredWebcamURL: URL?
-        private var lastMain: CGImage?
-        private var lastWebcam: CGImage?
+        private var lastMainBuffer: CVPixelBuffer?
+        private var lastWebcamBuffer: CVPixelBuffer?
         private var lastClockWriteback: Double = -1
         private var renderInFlight = false
         private let renderQueue = DispatchQueue(label: "com.smoooth.preview.render", qos: .userInteractive)
@@ -51,20 +51,24 @@ struct PreviewView: NSViewRepresentable {
 
         func attach(to view: PreviewNSView) {
             self.view = view
-            timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.render() }
-            }
+            // CADisplayLink is vsync-locked → steady cadence (Timer jittered, which
+            // is what made the zoom look "saccadé"). macOS 14+.
+            let link = view.displayLink(target: self, selector: #selector(tick))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
         }
 
         func teardown() {
-            timer?.invalidate(); timer = nil
+            displayLink?.invalidate(); displayLink = nil
             mainPlayer?.pause(); webcamPlayer?.pause()
         }
+
+        @objc private func tick() { render() }
 
         func configureIfNeeded() {
             if model.videoURL != configuredVideoURL {
                 configuredVideoURL = model.videoURL
-                lastMain = nil
+                lastMainBuffer = nil
                 if let url = model.videoURL {
                     let item = AVPlayerItem(url: url)
                     let out = AVPlayerItemVideoOutput(pixelBufferAttributes: [
@@ -77,7 +81,7 @@ struct PreviewView: NSViewRepresentable {
             }
             if model.webcamVideoURL != configuredWebcamURL {
                 configuredWebcamURL = model.webcamVideoURL
-                lastWebcam = nil
+                lastWebcamBuffer = nil
                 if let url = model.webcamVideoURL {
                     let item = AVPlayerItem(url: url)
                     let out = AVPlayerItemVideoOutput(pixelBufferAttributes: [
@@ -125,39 +129,54 @@ struct PreviewView: NSViewRepresentable {
                 }
             }
 
+            // Pull latest pixel buffers (cheap, retained refs). The expensive
+            // CIImage→CGImage conversion happens off-main in the render block.
             let itemTime = player.currentTime()
             if let out = mainOutput, out.hasNewPixelBuffer(forItemTime: itemTime),
                let pb = out.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
-                lastMain = cgImage(from: pb)
+                lastMainBuffer = pb
             }
             if let out = webcamOutput, let wp = webcamPlayer, out.hasNewPixelBuffer(forItemTime: wp.currentTime()),
                let pb = out.copyPixelBuffer(forItemTime: wp.currentTime(), itemTimeForDisplay: nil) {
-                lastWebcam = cgImage(from: pb)
+                lastWebcamBuffer = pb
             }
-            guard let main = lastMain else { return }
-            // Composite off the main thread so the 60fps timer never blocks the UI
-            // (the heavy CGContext draw was the source of zoom "stutter"). Drop a
-            // frame if the previous render is still running.
+            guard let mainBuf = lastMainBuffer else { return }
+            // Drop only if a composite is already running (don't queue a backlog).
             if renderInFlight { return }
             renderInFlight = true
+            // Capture everything from the @MainActor model HERE, on main.
             let sceneModel = model.sceneModel
             let t = model.currentTime
-            let dims = Geometry.exportDimensions(resolution: "720p", aspectRatio: model.aspectRatio)
-            let inputs = SceneFrameInputs(mainVideo: main, webcamVideo: lastWebcam,
-                                          backgroundImage: model.backgroundImage, cursorBitmaps: model.cursorBitmaps)
+            let bg = model.backgroundImage
+            let cursors = model.cursorBitmaps
+            let dims = Geometry.exportDimensions(resolution: "1080p", aspectRatio: model.aspectRatio)
+            let webcamBuf = lastWebcamBuffer
+            let ctx = ciContext
             renderQueue.async { [weak self] in
+                guard let main = Self.cgImage(from: mainBuf, ctx) else {
+                    DispatchQueue.main.async { self?.renderInFlight = false }; return
+                }
+                let webcam = webcamBuf.flatMap { Self.cgImage(from: $0, ctx) }
+                let inputs = SceneFrameInputs(mainVideo: main, webcamVideo: webcam,
+                                              backgroundImage: bg, cursorBitmaps: cursors)
                 let img = SceneRenderer.renderImage(model: sceneModel, inputs: inputs, currentTime: t, outputSize: dims)
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    if let img { self.view?.layer?.contents = img }
+                    if let img {
+                        // Snap contents with no implicit animation (avoids inter-frame fade).
+                        CATransaction.begin()
+                        CATransaction.setDisableActions(true)
+                        self.view?.layer?.contents = img
+                        CATransaction.commit()
+                    }
                     self.renderInFlight = false
                 }
             }
         }
 
-        private func cgImage(from pb: CVPixelBuffer) -> CGImage? {
+        private static func cgImage(from pb: CVPixelBuffer, _ ctx: CIContext) -> CGImage? {
             let ci = CIImage(cvPixelBuffer: pb)
-            return ciContext.createCGImage(ci, from: ci.extent)
+            return ctx.createCGImage(ci, from: ci.extent)
         }
     }
 }

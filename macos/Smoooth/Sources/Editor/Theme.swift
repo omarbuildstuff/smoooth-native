@@ -87,6 +87,8 @@ struct PremiumButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(.white)
             .padding(.horizontal, 16)
             .frame(height: height)
@@ -122,6 +124,8 @@ struct SoftButtonStyle: ButtonStyle {
         let fg = prominent ? theme.primaryForeground : theme.foreground
         return configuration.label
             .font(.system(size: 13, weight: .medium))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(fg)
             .frame(height: height)
             .frame(minWidth: iconOnly ? height : 0)

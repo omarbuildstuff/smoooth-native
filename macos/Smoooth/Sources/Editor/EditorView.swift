@@ -198,7 +198,7 @@ struct EditorView: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: systemImage).font(.system(size: 12, weight: .semibold))
-                Text(title).font(.system(size: 12, weight: .semibold))
+                Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1).fixedSize()
             }
             .foregroundStyle(model.selectedRegionID == nil ? theme.foreground : theme.mutedForeground.opacity(0.5))
             .padding(.horizontal, 12)

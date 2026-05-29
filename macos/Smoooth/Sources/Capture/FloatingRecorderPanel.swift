@@ -74,7 +74,7 @@ private struct RecordingHUDView: View {
             Button(action: onStop) {
                 HStack(spacing: 5) {
                     Image(systemName: "stop.fill").font(.system(size: 10, weight: .bold))
-                    Text("Stop").font(.system(size: 12, weight: .semibold))
+                    Text("Stop").font(.system(size: 12, weight: .semibold)).lineLimit(1).fixedSize()
                 }
                 .foregroundStyle(.white)
                 .padding(.horizontal, 12).frame(height: 30)
