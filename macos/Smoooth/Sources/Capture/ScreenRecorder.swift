@@ -42,8 +42,22 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
     private let audioQueue = DispatchQueue(label: "com.smoooth.screenrecorder.audio")
     private let micQueue = DispatchQueue(label: "com.smoooth.screenrecorder.mic")
 
-    private var sessionStarted = false
+    /// Session-start coordination. The writer session is anchored at the *latest*
+    /// first-sample PTS across video + every enabled audio stream, so movie-time 0
+    /// is the instant all streams are live. This trims the brief audio-less video
+    /// lead caused by microphone hardware warmup (~0.2–0.3s), which otherwise
+    /// leaves the mic track sitting late behind video in the muxed file (the
+    /// "video early / audio late" desync). Guarded by `startLock`.
+    private let startLock = NSLock()
+    private var didStartSession = false
+    private var anchorPTS: CMTime = .invalid
     private var firstVideoPTS: CMTime = .invalid
+    private var firstSystemAudioPTS: CMTime = .invalid
+    private var firstMicPTS: CMTime = .invalid
+    private var firstVideoWallClock: Double = 0
+    /// Fallback: if an enabled audio stream never delivers (e.g. dead device),
+    /// start anyway this many seconds after the first video frame.
+    private let audioWarmupTimeout: Double = 1.0
 
     /// Guards the cross-thread scalars (`stopError`, `firstFrameWallClock`) that
     /// are written on the SCKit delegate / sample queues and read on the
@@ -344,13 +358,16 @@ extension ScreenRecorder: SCStreamOutput {
         case .screen:
             handleVideo(sampleBuffer)
         case .audio:
-            handleAudio(sampleBuffer, input: systemAudioInput)
+            handleAudio(sampleBuffer, input: systemAudioInput, stream: .systemAudio)
         default:
             if #available(macOS 15.0, *), type == .microphone {
-                handleAudio(sampleBuffer, input: micAudioInput)
+                handleAudio(sampleBuffer, input: micAudioInput, stream: .microphone)
             }
         }
     }
+
+    /// Identifies which stream a sample arrived on, for first-PTS bookkeeping.
+    private enum StreamKind { case video, systemAudio, microphone }
 
     private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
         // Drop frames flagged as not-complete/idle by SCKit (e.g. paused).
@@ -358,27 +375,80 @@ extension ScreenRecorder: SCStreamOutput {
         guard let writer, let videoInput else { return }
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
-        if !sessionStarted {
-            sessionStarted = true
-            firstVideoPTS = pts
-            firstFrameWallClock = Date().timeIntervalSince1970
-            writer.startSession(atSourceTime: pts)
-        }
+        guard ensureSessionStarted(pts: pts, stream: .video) else { return }
+        // Trim the leading audio-less frames: only append at/after the anchor.
+        guard pts >= anchor() else { return }
 
         if writer.status == .writing, videoInput.isReadyForMoreMediaData {
             videoInput.append(sampleBuffer)
         }
     }
 
-    private func handleAudio(_ sampleBuffer: CMSampleBuffer, input: AVAssetWriterInput?) {
+    private func handleAudio(_ sampleBuffer: CMSampleBuffer, input: AVAssetWriterInput?, stream: StreamKind) {
         guard let writer, let input else { return }
-        // Audio that arrives before the first video frame has nothing to anchor
-        // to; drop it so the session timeline starts cleanly on video.
-        guard sessionStarted, writer.status == .writing else { return }
-        if input.isReadyForMoreMediaData {
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard ensureSessionStarted(pts: pts, stream: stream) else { return }
+        // Drop pre-anchor audio so every track begins at the common origin.
+        guard pts >= anchor() else { return }
+        if writer.status == .writing, input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
         }
+    }
+
+    /// Records the first PTS for `stream` and, once every *enabled* stream has
+    /// delivered a sample (or the warmup timeout elapses), starts the writer
+    /// session anchored at the latest of those first PTSes. Returns whether the
+    /// session has started — callers drop their sample until it has.
+    ///
+    /// Anchoring at the latest first-sample (rather than the first video frame,
+    /// as before) guarantees every track has media at movie-time 0. The mic's
+    /// missing warmup audio is genuinely uncaptured, so the correct fix is to
+    /// trim the matching leading video, not to shift audio earlier.
+    private func ensureSessionStarted(pts: CMTime, stream: StreamKind) -> Bool {
+        startLock.lock()
+        defer { startLock.unlock() }
+        if didStartSession { return true }
+
+        switch stream {
+        case .video:
+            if !firstVideoPTS.isValid {
+                firstVideoPTS = pts
+                firstVideoWallClock = Date().timeIntervalSince1970
+            }
+        case .systemAudio:
+            if !firstSystemAudioPTS.isValid { firstSystemAudioPTS = pts }
+        case .microphone:
+            if !firstMicPTS.isValid { firstMicPTS = pts }
+        }
+
+        // Can't anchor before we have at least one video frame.
+        guard firstVideoPTS.isValid, let writer else { return false }
+
+        // Only wait on audio streams that were actually wired up (input exists).
+        let needSystem = systemAudioInput != nil
+        let needMic = micAudioInput != nil
+        let haveSystem = !needSystem || firstSystemAudioPTS.isValid
+        let haveMic = !needMic || firstMicPTS.isValid
+        let timedOut = (Date().timeIntervalSince1970 - firstVideoWallClock) >= audioWarmupTimeout
+
+        guard (haveSystem && haveMic) || timedOut else { return false }
+
+        var a = firstVideoPTS
+        if firstSystemAudioPTS.isValid { a = CMTimeMaximum(a, firstSystemAudioPTS) }
+        if firstMicPTS.isValid { a = CMTimeMaximum(a, firstMicPTS) }
+        anchorPTS = a
+
+        writer.startSession(atSourceTime: a)
+        didStartSession = true
+        // Wall clock of movie-time 0 (the anchor) — used to rebase mouse events.
+        firstFrameWallClock = Date().timeIntervalSince1970
+        return true
+    }
+
+    /// Common session anchor (latest first-sample PTS); `.invalid` until started.
+    private func anchor() -> CMTime {
+        startLock.lock(); defer { startLock.unlock() }
+        return anchorPTS
     }
 
     /// SCKit attaches per-frame status; only `.complete` frames carry new pixels.
