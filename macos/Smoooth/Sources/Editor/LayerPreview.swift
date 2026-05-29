@@ -364,7 +364,10 @@ struct LayerPreview: NSViewRepresentable {
 }
 
 final class PreviewLayerView: NSView {
-    override var isFlipped: Bool { true }
+    // NOT flipped: the backing layer stays bottom-left, matching the LayerPreview
+    // coordinate math (canvas + sublayers all bottom-left). isFlipped=true added a
+    // hidden backing-layer geometry flip that pushed the cursor to the wrong Y.
+    override var isFlipped: Bool { false }
     override func layout() { super.layout(); layer?.sublayers?.first?.setNeedsLayout() }
 }
 
