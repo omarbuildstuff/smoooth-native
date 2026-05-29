@@ -84,24 +84,12 @@ public enum SceneRenderer {
 
         // 2. Frame & content dimensions
         let fs = model.frameStyles
-        let paddingPercent = fs.padding / 100
-        let availableWidth = outputWidth * (1 - 2 * paddingPercent)
-        let availableHeight = outputHeight * (1 - 2 * paddingPercent)
-        let videoAspect = model.videoDimensions.width / model.videoDimensions.height
-
-        var frameContentWidth: Double
-        var frameContentHeight: Double
-        if availableWidth / availableHeight > videoAspect {
-            frameContentHeight = availableHeight
-            frameContentWidth = (frameContentHeight * videoAspect).rounded()
-            frameContentHeight = (frameContentWidth / videoAspect).rounded()
-        } else {
-            frameContentWidth = availableWidth
-            frameContentHeight = (frameContentWidth / videoAspect).rounded()
-            frameContentWidth = (frameContentHeight * videoAspect).rounded()
-        }
-        let frameX = ((outputWidth - frameContentWidth) / 2).rounded()
-        let frameY = ((outputHeight - frameContentHeight) / 2).rounded()
+        let layout = SceneLayout.compute(outputWidth: outputWidth, outputHeight: outputHeight,
+                                         videoDimensions: model.videoDimensions, padding: fs.padding)
+        let frameContentWidth = layout.frameContentWidth
+        let frameContentHeight = layout.frameContentHeight
+        let frameX = layout.frameX
+        let frameY = layout.frameY
 
         // 3. Zoom transform
         let recGeo = model.recordingGeometry ?? model.videoDimensions
@@ -341,7 +329,7 @@ public enum SceneRenderer {
 
     /// Draws a synthetic pointer (no captured bitmap needed). All shapes have the tip /
     /// center at (x, y) so they land on the real pointer location.
-    static func drawSyntheticCursor(_ ctx: CGContext, theme: CursorTheme, x: Double, y: Double, size: Double) {
+    public static func drawSyntheticCursor(_ ctx: CGContext, theme: CursorTheme, x: Double, y: Double, size: Double) {
         let white = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         let black = CGColor(srgbRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
         switch theme {

@@ -22,7 +22,7 @@ struct EditorView: View {
                     }
 
                 VStack(spacing: 0) {
-                    PreviewView(model: model)
+                    LayerPreview(model: model)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(24)
                     transport
