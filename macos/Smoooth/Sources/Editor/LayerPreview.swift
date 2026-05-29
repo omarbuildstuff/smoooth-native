@@ -276,7 +276,14 @@ struct LayerPreview: NSViewRepresentable {
                     cursorLayer.contents = bmp.image
                     cursorLayer.bounds = CGRect(x: 0, y: 0, width: bmp.width, height: bmp.height)
                     cursorLayer.anchorPoint = CGPoint(x: bmp.xhot / max(1, bmp.width), y: bmp.yhot / max(1, bmp.height))
-                } else if cs.theme != .system {
+                } else if cs.theme == .bayzo, let bmp = model.customCursor {
+                    // Scale to target height = size*2.2 (matches SceneRenderer export).
+                    let targetH = cs.size * 2.2
+                    let s = targetH / max(1, bmp.height)
+                    cursorLayer.contents = bmp.image
+                    cursorLayer.bounds = CGRect(x: 0, y: 0, width: bmp.width * s, height: bmp.height * s)
+                    cursorLayer.anchorPoint = CGPoint(x: bmp.xhot / max(1, bmp.width), y: bmp.yhot / max(1, bmp.height))
+                } else if cs.theme == .classic || cs.theme == .dot || cs.theme == .highlight {
                     let (img, anchor, size) = SyntheticCursor.image(theme: cs.theme, size: cs.size, scale: scale)
                     cursorLayer.contents = img
                     cursorLayer.bounds = CGRect(x: 0, y: 0, width: size.width, height: size.height)

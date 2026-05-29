@@ -43,10 +43,13 @@ public struct SceneFrameInputs {
     public var webcamVideo: CGImage?
     public var backgroundImage: CGImage?
     public var cursorBitmaps: [String: CursorBitmap]
+    /// Image for an image-based cursor theme (e.g. Bayzo), with its hotspot.
+    public var customCursor: CursorBitmap?
     public init(mainVideo: CGImage, webcamVideo: CGImage? = nil, backgroundImage: CGImage? = nil,
-                cursorBitmaps: [String: CursorBitmap] = [:]) {
+                cursorBitmaps: [String: CursorBitmap] = [:], customCursor: CursorBitmap? = nil) {
         self.mainVideo = mainVideo; self.webcamVideo = webcamVideo
         self.backgroundImage = backgroundImage; self.cursorBitmaps = cursorBitmaps
+        self.customCursor = customCursor
     }
 }
 
@@ -285,9 +288,11 @@ public enum SceneRenderer {
         let cursorX = (event.x / recordingGeometry.width) * frameContentWidth
         let cursorY = (event.y / recordingGeometry.height) * frameContentHeight
 
-        // System theme needs a captured bitmap; synthetic themes don't.
+        // System theme needs a captured bitmap; Bayzo needs the supplied custom image;
+        // synthetic themes need neither.
         let bitmap: CursorBitmap? = event.cursorImageKey.flatMap { inputs.cursorBitmaps[$0] }
         if cs.theme == .system && (bitmap == nil || bitmap!.width <= 0) { return }
+        if cs.theme == .bayzo && inputs.customCursor == nil && (bitmap == nil || bitmap!.width <= 0) { return }
 
         // Click-scale (shared by all themes).
         var cursorScale = 1.0
@@ -317,14 +322,29 @@ public enum SceneRenderer {
 
         switch cs.theme {
         case .system:
-            let cursor = bitmap!
-            let drawX = (cursorX - cursor.xhot).rounded()
-            let drawY = (cursorY - cursor.yhot).rounded()
-            drawImageTopLeft(ctx, cursor.image, in: CGRect(x: drawX, y: drawY, width: cursor.width, height: cursor.height))
+            drawCursorImage(ctx, bitmap!, x: cursorX, y: cursorY, targetHeight: nil)
+        case .bayzo:
+            if let custom = inputs.customCursor {
+                // Scale the image to the configured size (size = target height in frame px).
+                drawCursorImage(ctx, custom, x: cursorX, y: cursorY, targetHeight: cs.size * 2.2)
+            } else if let bmp = bitmap {
+                drawCursorImage(ctx, bmp, x: cursorX, y: cursorY, targetHeight: nil)
+            }
         case .classic, .dot, .highlight:
             drawSyntheticCursor(ctx, theme: cs.theme, x: cursorX, y: cursorY, size: cs.size)
         }
         ctx.restoreGState()
+    }
+
+    /// Draws a cursor bitmap with its hotspot at (x, y). `targetHeight == nil` draws at
+    /// native pixel size; otherwise the image (and its hotspot) scale to that height.
+    static func drawCursorImage(_ ctx: CGContext, _ cursor: CursorBitmap, x: Double, y: Double, targetHeight: Double?) {
+        let scale = targetHeight.map { $0 / max(1, cursor.height) } ?? 1
+        let w = cursor.width * scale, h = cursor.height * scale
+        let xhot = cursor.xhot * scale, yhot = cursor.yhot * scale
+        let drawX = scale == 1 ? (x - xhot).rounded() : (x - xhot)
+        let drawY = scale == 1 ? (y - yhot).rounded() : (y - yhot)
+        drawImageTopLeft(ctx, cursor.image, in: CGRect(x: drawX, y: drawY, width: w, height: h))
     }
 
     /// Draws a synthetic pointer (no captured bitmap needed). All shapes have the tip /
@@ -361,8 +381,8 @@ public enum SceneRenderer {
             let r = size * 0.22
             ctx.setFillColor(CGColor(srgbRed: 1.0, green: 0.78, blue: 0.10, alpha: 0.95))
             ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
-        case .system:
-            break
+        case .system, .bayzo:
+            break   // image-based themes are drawn via drawCursorImage, not here
         }
     }
 

@@ -25,6 +25,7 @@ public final class VideoExporter: @unchecked Sendable {
         public var model: SceneModel
         public var backgroundImage: CGImage?
         public var cursorBitmaps: [String: CursorBitmap]
+        public var customCursor: CursorBitmap?
         public var duration: Double
         public var cutRegions: [String: CutRegion]
         public var speedRegions: [String: SpeedRegion]
@@ -34,11 +35,13 @@ public final class VideoExporter: @unchecked Sendable {
 
         public init(mainVideoURL: URL, webcamVideoURL: URL? = nil, model: SceneModel,
                     backgroundImage: CGImage? = nil, cursorBitmaps: [String: CursorBitmap] = [:],
+                    customCursor: CursorBitmap? = nil,
                     duration: Double, cutRegions: [String: CutRegion] = [:],
                     speedRegions: [String: SpeedRegion] = [:], aspectRatio: AspectRatio,
                     settings: ExportSettings, outputURL: URL) {
             self.mainVideoURL = mainVideoURL; self.webcamVideoURL = webcamVideoURL; self.model = model
             self.backgroundImage = backgroundImage; self.cursorBitmaps = cursorBitmaps
+            self.customCursor = customCursor
             self.duration = duration; self.cutRegions = cutRegions; self.speedRegions = speedRegions
             self.aspectRatio = aspectRatio; self.settings = settings; self.outputURL = outputURL
         }
@@ -64,7 +67,8 @@ public final class VideoExporter: @unchecked Sendable {
             lastImage = main
             let webcam = webcamSource != nil ? await webcamSource!.image(at: sourceTime) : nil
             let inputs = SceneFrameInputs(mainVideo: main, webcamVideo: webcam,
-                                          backgroundImage: job.backgroundImage, cursorBitmaps: job.cursorBitmaps)
+                                          backgroundImage: job.backgroundImage, cursorBitmaps: job.cursorBitmaps,
+                                          customCursor: job.customCursor)
             return SceneRenderer.renderImage(model: job.model, inputs: inputs, currentTime: sourceTime, outputSize: dims)
         }
 

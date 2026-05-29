@@ -185,9 +185,13 @@ public struct FrameStyles: Codable, Equatable, Sendable {
 /// the others are synthetic and work on any recording (even with no captured image).
 public enum CursorTheme: String, Codable, Sendable, CaseIterable {
     case system = "System"
+    case bayzo = "Bayzo"
     case classic = "Classic"
     case dot = "Dot"
     case highlight = "Highlight"
+
+    /// True for image-based custom themes that need a supplied `customCursor` bitmap.
+    public var isImageCursor: Bool { self == .bayzo }
 }
 
 public struct CursorStyles: Codable, Equatable, Sendable {

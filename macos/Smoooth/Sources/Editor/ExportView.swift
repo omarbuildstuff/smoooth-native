@@ -176,6 +176,7 @@ struct ExportView: View {
         let job = VideoExporter.Job(
             mainVideoURL: mainURL, webcamVideoURL: model.webcamVideoURL, model: model.sceneModel,
             backgroundImage: model.backgroundImage, cursorBitmaps: model.cursorBitmaps,
+            customCursor: model.customCursor,
             duration: model.duration, cutRegions: model.cutRegions, speedRegions: model.speedRegions,
             aspectRatio: model.aspectRatio, settings: settings, outputURL: outputURL)
 
