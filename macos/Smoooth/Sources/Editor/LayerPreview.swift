@@ -2,16 +2,15 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import CoreImage
+import CoreGraphics
 import SmooothCore
 
-/// GPU-composited live preview. The heavy parts (background, rounded frame, shadow,
-/// border) are CALayers configured only when style changes; the zoom/pan is applied
-/// as a CATransform3D on the frame layer EACH display tick (GPU, ~free), and the
-/// video/webcam layers just swap `contents` at video rate. This replaces the
-/// per-frame CPU CGContext composite (which capped at ~19–32 fps → "saccadé").
-///
-/// Export still uses SceneRenderer (CGContext) for exact, offline-quality output;
-/// both share SceneLayout + ZoomTransform so preview matches the export.
+/// Live preview. Composites each frame with `SceneRenderer` — the SAME compositor
+/// the exporter uses — so the preview is guaranteed identical to the export
+/// (cursor placement, zoom, webcam, orientation). Rendering runs off the main
+/// thread on a `CADisplayLink` tick at the view's display size (not a fixed 1080p),
+/// which keeps it smooth; the composited CGImage is swapped onto the layer with no
+/// implicit animation.
 struct LayerPreview: NSViewRepresentable {
     let model: EditorModel
 
@@ -30,7 +29,6 @@ struct LayerPreview: NSViewRepresentable {
         private weak var view: PreviewLayerView?
         private var link: CADisplayLink?
 
-        // Players
         private var mainPlayer: AVPlayer?
         private var mainOutput: AVPlayerItemVideoOutput?
         private var webcamPlayer: AVPlayer?
@@ -38,20 +36,12 @@ struct LayerPreview: NSViewRepresentable {
         private var cfgVideoURL: URL?
         private var cfgWebcamURL: URL?
         private var lastClockWriteback = -1.0
+
+        private var lastMainBuffer: CVPixelBuffer?
+        private var lastWebcamBuffer: CVPixelBuffer?
+        private var renderInFlight = false
+        private let renderQueue = DispatchQueue(label: "com.smoooth.preview", qos: .userInteractive)
         private let ci = CIContext(options: [.useSoftwareRenderer: false])
-        private var bakeInFlight = false
-        private let bakeQueue = DispatchQueue(label: "com.smoooth.preview.bake", qos: .userInteractive)
-
-        // Layers
-        private let canvas = CALayer()          // output rect; background lives here
-        private let shadowLayer = CALayer()      // carries the frame shadow (zoomed)
-        private let frameClip = CALayer()        // rounded, clips video+cursor (zoomed)
-        private let videoLayer = CALayer()
-        private let webcamLayer = CALayer()      // output space (not zoomed)
-        private var gradientLayer: CAGradientLayer?
-
-        // Cached style signature to avoid reconfiguring static layers every frame.
-        private var styleKey = ""
 
         init(model: EditorModel) { self.model = model }
 
@@ -59,20 +49,7 @@ struct LayerPreview: NSViewRepresentable {
             view = v
             v.wantsLayer = true
             v.layer?.backgroundColor = NSColor.black.cgColor
-            // Top-left origin so all math matches SceneLayout/ZoomTransform.
-            canvas.isGeometryFlipped = true
-            canvas.masksToBounds = true
-            v.layer?.addSublayer(canvas)
-
-            shadowLayer.backgroundColor = NSColor.clear.cgColor
-            frameClip.masksToBounds = true
-            frameClip.addSublayer(videoLayer)   // cursor is baked into the video frame
-            videoLayer.contentsGravity = .resize
-            webcamLayer.masksToBounds = true
-            canvas.addSublayer(shadowLayer)
-            canvas.addSublayer(frameClip)
-            canvas.addSublayer(webcamLayer)
-
+            v.layer?.contentsGravity = .resizeAspect
             let dl = v.displayLink(target: self, selector: #selector(tick))
             dl.add(to: .main, forMode: .common)
             link = dl
@@ -84,7 +61,7 @@ struct LayerPreview: NSViewRepresentable {
 
         private func configurePlayers() {
             if model.videoURL != cfgVideoURL {
-                cfgVideoURL = model.videoURL
+                cfgVideoURL = model.videoURL; lastMainBuffer = nil
                 if let url = model.videoURL {
                     let item = AVPlayerItem(url: url)
                     let out = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
@@ -93,7 +70,7 @@ struct LayerPreview: NSViewRepresentable {
                 } else { mainPlayer = nil; mainOutput = nil }
             }
             if model.webcamVideoURL != cfgWebcamURL {
-                cfgWebcamURL = model.webcamVideoURL
+                cfgWebcamURL = model.webcamVideoURL; lastWebcamBuffer = nil
                 if let url = model.webcamVideoURL {
                     let item = AVPlayerItem(url: url)
                     let out = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
@@ -106,10 +83,9 @@ struct LayerPreview: NSViewRepresentable {
         private func render() {
             configurePlayers()
             guard let view, let player = mainPlayer else { return }
-            let scale = view.window?.backingScaleFactor ?? 2
-
-            // --- Clock (same logic as before) ---
             player.volume = Float(model.isMuted ? 0 : model.volume)
+
+            // Clock
             if model.isPlaying {
                 let target = CMTime(seconds: model.currentTime, preferredTimescale: 600)
                 if player.timeControlStatus != .playing {
@@ -130,197 +106,65 @@ struct LayerPreview: NSViewRepresentable {
                 }
             }
 
-            // --- Main video frame: convert + bake the cursor off-main, then swap ---
+            // Latest frames (cheap retained refs; convert off-main).
             let itemTime = player.currentTime()
             if let out = mainOutput, out.hasNewPixelBuffer(forItemTime: itemTime),
-               let pb = out.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil), !bakeInFlight {
-                bakeInFlight = true
-                let sceneModel = model.sceneModel
-                let t = model.currentTime
-                let cursors = model.cursorBitmaps
-                let custom = model.customCursor
-                let ctxRef = ci
-                bakeQueue.async { [weak self] in
-                    guard let base = Self.cgFrom(pb, ctxRef) else { DispatchQueue.main.async { self?.bakeInFlight = false }; return }
-                    let inputs = SceneFrameInputs(mainVideo: base, cursorBitmaps: cursors, customCursor: custom)
-                    let composed = SceneRenderer.bakeCursor(into: base, model: sceneModel, inputs: inputs, currentTime: t)
-                    DispatchQueue.main.async {
-                        guard let self else { return }
+               let pb = out.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) { lastMainBuffer = pb }
+            if let out = webcamOutput, let wp = webcamPlayer, out.hasNewPixelBuffer(forItemTime: wp.currentTime()),
+               let pb = out.copyPixelBuffer(forItemTime: wp.currentTime(), itemTimeForDisplay: nil) { lastWebcamBuffer = pb }
+            guard let mainBuf = lastMainBuffer else { return }
+            if renderInFlight { return }
+            renderInFlight = true
+
+            // Output at the view's display size (capped), driven by the chosen aspect.
+            let scale = view.window?.backingScaleFactor ?? 2
+            let comps = model.aspectRatio.components
+            let viewWpx = max(2, view.bounds.width * scale)
+            let viewHpx = max(2, view.bounds.height * scale)
+            let ar = comps.w / comps.h
+            var outW = viewWpx, outH = viewWpx / ar
+            if outH > viewHpx { outH = viewHpx; outW = viewHpx * ar }
+            // Cap modestly so the CPU composite keeps pace with the audio clock
+            // (large sizes lagged the video behind the audio). Preview only.
+            let cap = 960.0
+            if outW > cap { outH *= cap / outW; outW = cap }
+            let dims = SizeI(width: max(2, Int(outW.rounded())), height: max(2, Int(outH.rounded())))
+
+            let sceneModel = model.sceneModel
+            let t = model.currentTime
+            let bg = model.backgroundImage
+            let cursors = model.cursorBitmaps
+            let custom = model.customCursor
+            let mainBufRef = mainBuf
+            let webcamBufRef = lastWebcamBuffer
+            let ctx = ci
+
+            renderQueue.async { [weak self] in
+                let main = Self.cg(mainBufRef, ctx)
+                let webcam = webcamBufRef.flatMap { Self.cg($0, ctx) }
+                guard let main else { DispatchQueue.main.async { self?.renderInFlight = false }; return }
+                let inputs = SceneFrameInputs(mainVideo: main, webcamVideo: webcam,
+                                              backgroundImage: bg, cursorBitmaps: cursors, customCursor: custom)
+                let img = SceneRenderer.renderImage(model: sceneModel, inputs: inputs, currentTime: t, outputSize: dims)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let img {
                         CATransaction.begin(); CATransaction.setDisableActions(true)
-                        self.videoLayer.contents = composed
+                        self.view?.layer?.contents = img
                         CATransaction.commit()
-                        self.bakeInFlight = false
                     }
+                    self.renderInFlight = false
                 }
             }
-            if let out = webcamOutput, let wp = webcamPlayer, out.hasNewPixelBuffer(forItemTime: wp.currentTime()),
-               let pb = out.copyPixelBuffer(forItemTime: wp.currentTime(), itemTimeForDisplay: nil),
-               let cg = cg(pb) {
-                CATransaction.begin(); CATransaction.setDisableActions(true)
-                webcamLayer.contents = cg
-                CATransaction.commit()
-            }
-
-            layout(scale: scale)
         }
 
-        private func cg(_ pb: CVPixelBuffer) -> CGImage? {
-            let img = CIImage(cvPixelBuffer: pb)
-            return ci.createCGImage(img, from: img.extent)
-        }
-
-        private static func cgFrom(_ pb: CVPixelBuffer, _ ctx: CIContext) -> CGImage? {
+        private static func cg(_ pb: CVPixelBuffer, _ ctx: CIContext) -> CGImage? {
             let img = CIImage(cvPixelBuffer: pb)
             return ctx.createCGImage(img, from: img.extent)
-        }
-
-        /// Positions layers each tick. Static layers reconfigured only on style change.
-        private func layout(scale: CGFloat) {
-            guard let view else { return }
-            let viewW = view.bounds.width, viewH = view.bounds.height
-            guard viewW > 1, viewH > 1 else { return }
-
-            // Output rect = aspect-fit the chosen ratio into the view (letterboxed).
-            let comps = model.aspectRatio.components
-            let ar = comps.w / comps.h
-            var outW = viewW, outH = viewW / ar
-            if outH > viewH { outH = viewH; outW = viewH * ar }
-            let outX = ((viewW - outW) / 2).rounded(), outY = ((viewH - outH) / 2).rounded()
-
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            canvas.frame = CGRect(x: outX, y: outY, width: outW, height: outH)
-            canvas.contentsScale = scale
-
-            let fs = model.frameStyles
-            let lay = SceneLayout.compute(outputWidth: outW, outputHeight: outH,
-                                          videoDimensions: model.videoDimensions, padding: fs.padding)
-            let contentRect = CGRect(x: lay.frameX, y: lay.frameY, width: lay.frameContentWidth, height: lay.frameContentHeight)
-            let radius = min(fs.borderRadius, min(lay.frameContentWidth, lay.frameContentHeight) / 2)
-
-            configureBackground(outW: outW, outH: outH, scale: scale)
-            configureStaticFrame(contentRect: contentRect, radius: radius, fs: fs, scale: scale)
-
-            // --- Zoom/pan transform on the frame + shadow (GPU) ---
-            let recGeo = model.recordingGeometry.map { SizeD(width: $0.width, height: $0.height) } ?? model.videoDimensions
-            let zt = ZoomTransform.calculate(currentTime: model.currentTime, zoomRegions: model.zoomRegions,
-                                             metadata: model.metadata, recordingGeometry: recGeo,
-                                             frameContent: SizeD(width: lay.frameContentWidth, height: lay.frameContentHeight))
-            applyZoom(zt, contentRect: contentRect)
-
-            updateWebcam(outW: outW, outH: outH, lay: lay, zt: zt, scale: scale)
-            CATransaction.commit()
-        }
-
-        private func applyZoom(_ zt: ZoomTransformResult, contentRect: CGRect) {
-            // anchor at the zoom origin (fraction); position so that, at scale s, the
-            // origin lands at frameXY + originPx + s*(tx,ty) — matching SceneRenderer.
-            let s = zt.scale
-            let originPxX = zt.originX * contentRect.width
-            let originPxY = zt.originY * contentRect.height
-            for l in [shadowLayer, frameClip] {
-                l.bounds = CGRect(x: 0, y: 0, width: contentRect.width, height: contentRect.height)
-                l.anchorPoint = CGPoint(x: zt.originX, y: zt.originY)
-                l.position = CGPoint(x: contentRect.minX + originPxX + s * zt.translateX,
-                                     y: contentRect.minY + originPxY + s * zt.translateY)
-                l.transform = CATransform3DMakeScale(s, s, 1)
-            }
-        }
-
-        private func configureBackground(outW: Double, outH: Double, scale: CGFloat) {
-            let bg = model.frameStyles.background
-            switch bg.type {
-            case .color:
-                gradientLayer?.removeFromSuperlayer(); gradientLayer = nil
-                canvas.contents = nil
-                canvas.backgroundColor = ColorParse.cgColor(bg.color ?? "#101820")
-            case .gradient:
-                canvas.contents = nil; canvas.backgroundColor = NSColor.clear.cgColor
-                let g = gradientLayer ?? { let l = CAGradientLayer(); canvas.insertSublayer(l, at: 0); gradientLayer = l; return l }()
-                g.frame = CGRect(x: 0, y: 0, width: outW, height: outH)
-                g.colors = [ColorParse.cgColor(bg.gradientStart ?? "#4f46e5"), ColorParse.cgColor(bg.gradientEnd ?? "#0ea5e9")]
-                let dir = bg.gradientDirection ?? "to bottom right"
-                let (sp, ep) = gradientPoints(dir)
-                g.startPoint = sp; g.endPoint = ep
-            case .image, .wallpaper:
-                gradientLayer?.removeFromSuperlayer(); gradientLayer = nil
-                canvas.backgroundColor = NSColor.black.cgColor
-                canvas.contentsGravity = .resizeAspectFill
-                canvas.contents = model.backgroundImage
-            }
-        }
-
-        private func configureStaticFrame(contentRect: CGRect, radius: Double, fs: FrameStyles, scale: CGFloat) {
-            let key = "\(Int(contentRect.width))x\(Int(contentRect.height))-\(radius)-\(fs.borderWidth)-\(fs.borderColor)-\(fs.shadowBlur)-\(fs.shadowOffsetX)-\(fs.shadowOffsetY)-\(fs.shadowColor)-\(scale)"
-            videoLayer.frame = CGRect(x: 0, y: 0, width: contentRect.width, height: contentRect.height)
-            videoLayer.contentsScale = scale
-            if key == styleKey { return }
-            styleKey = key
-            frameClip.cornerRadius = radius
-            frameClip.contentsScale = scale
-            // frameClip (masksToBounds) clips the video to the rounded rect.
-            // border on the clip layer (on top of video)
-            frameClip.borderWidth = fs.borderWidth
-            frameClip.borderColor = ColorParse.cgColor(fs.borderColor)
-            // shadow on the shadow layer behind
-            if fs.shadowBlur > 0 {
-                shadowLayer.backgroundColor = CGColor(gray: 0, alpha: 1)
-                shadowLayer.cornerRadius = radius
-                shadowLayer.shadowColor = ColorParse.cgColor(fs.shadowColor)
-                shadowLayer.shadowOpacity = 1
-                shadowLayer.shadowRadius = fs.shadowBlur / 2     // CG blur ≈ 2×layer shadowRadius
-                shadowLayer.shadowOffset = CGSize(width: fs.shadowOffsetX, height: fs.shadowOffsetY)
-            } else {
-                shadowLayer.shadowOpacity = 0; shadowLayer.backgroundColor = NSColor.clear.cgColor
-            }
-        }
-
-        // (Cursor is baked into the video frame via SceneRenderer.bakeCursor.)
-
-        private func updateWebcam(outW: Double, outH: Double, lay: SceneLayout, zt: ZoomTransformResult, scale: CGFloat) {
-            guard model.isWebcamVisible, model.webcamVideoURL != nil, webcamLayer.contents != nil else { webcamLayer.isHidden = true; return }
-            webcamLayer.isHidden = false
-            webcamLayer.contentsScale = scale
-            let ws = model.webcamStyles
-            let baseSize = min(outW, outH)
-            var w = baseSize * (ws.size / 100), h = ws.shape == .rectangle ? w * 9/16 : w
-            // scale-on-zoom
-            if ws.scaleOnZoom, zt.scale != 1 {
-                let amt = Defaults.Camera.scaleOnZoomAmount
-                // approximate: blend toward amt by how far into the zoom we are
-                let f = (zt.scale - 1) / max(0.0001, (model.zoomRegions.values.first?.zoomLevel ?? 2) - 1)
-                let m = 1 - (1 - amt) * min(1, max(0, f))
-                w *= m; h *= m
-            }
-            let rect = Geometry.webcamRect(for: model.webcamPosition, width: w, height: h, outputWidth: outW, outputHeight: outH)
-            webcamLayer.frame = CGRect(x: rect.x, y: rect.y, width: rect.width, height: rect.height)
-            webcamLayer.contentsGravity = .resizeAspectFill
-            let maxR = min(w, h) / 2
-            webcamLayer.cornerRadius = ws.shape == .circle ? maxR : maxR * (ws.borderRadius / 50)
-            if ws.shadowBlur > 0 {
-                webcamLayer.shadowColor = ColorParse.cgColor(ws.shadowColor)
-                webcamLayer.shadowOpacity = 1; webcamLayer.shadowRadius = ws.shadowBlur / 2
-                webcamLayer.shadowOffset = CGSize(width: ws.shadowOffsetX, height: ws.shadowOffsetY)
-            } else { webcamLayer.shadowOpacity = 0 }
-        }
-
-        private func gradientPoints(_ dir: String) -> (CGPoint, CGPoint) {
-            // canvas is geometry-flipped (top-left), CAGradientLayer uses unit coords (0,0)=bottomLeft normally;
-            // with isGeometryFlipped the y is flipped too, so treat (0,0)=top-left.
-            switch dir {
-            case "to bottom": return (CGPoint(x: 0.5, y: 0), CGPoint(x: 0.5, y: 1))
-            case "to top": return (CGPoint(x: 0.5, y: 1), CGPoint(x: 0.5, y: 0))
-            case "to right": return (CGPoint(x: 0, y: 0.5), CGPoint(x: 1, y: 0.5))
-            case "to left": return (CGPoint(x: 1, y: 0.5), CGPoint(x: 0, y: 0.5))
-            case "to bottom left": return (CGPoint(x: 1, y: 0), CGPoint(x: 0, y: 1))
-            case "to top right": return (CGPoint(x: 0, y: 1), CGPoint(x: 1, y: 0))
-            case "to top left": return (CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 0))
-            default: return (CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 1)) // to bottom right
-            }
         }
     }
 }
 
 final class PreviewLayerView: NSView {
     override var isFlipped: Bool { true }
-    override func layout() { super.layout(); layer?.sublayers?.first?.setNeedsLayout() }
 }
