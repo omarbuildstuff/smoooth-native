@@ -33,7 +33,8 @@ final class EditorModel {
         guard let url = Bundle.main.url(forResource: "BayzoCursor", withExtension: "png"),
               let cg = ImageLoader.load(url) else { return nil }
         let w = Double(cg.width), h = Double(cg.height)
-        return CursorBitmap(image: cg, width: w, height: h, xhot: w * 0.853, yhot: h * 0.506)
+        // Hotspot = the pointer's tip, the top-left apex of the arrow.
+        return CursorBitmap(image: cg, width: w, height: h, xhot: w * 0.28, yhot: h * 0.11)
     }
 
     // Playback
